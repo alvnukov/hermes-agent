@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Tuple
 from agent.file_safety import HOME_CREDENTIAL_DIRS
 from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS
+from hermes_cli import profile_creation as _creation
 from hermes_constants import (
     LOCAL_RUNTIME_ROOT_DIRS, PROFILE_ID_RE, clear_named_profile_deleted, mark_named_profile_deleted,
     named_profile_has_identity, named_profile_is_deleted, named_profile_is_live,
@@ -1427,10 +1428,16 @@ def create_profile(
     cloning = clone_from is not None or clone_all or clone_config
     if clone_channels and not cloning:
         raise ValueError("--clone-channels only applies to a clone (--clone, --clone-from or --clone-all).")
+    # Bootstrap isolation skips shared-root gateway probes and tombstone writes.
+    create_isolated = _creation.is_profile_creation_isolated()
     canon = _canon_valid(name)
     if canon == "default":
         raise ValueError("Cannot create a profile named 'default' — it is the built-in profile (~/.hermes).")
     profile_dir = get_profile_dir(canon)
+    if create_isolated and named_profile_is_deleted(profile_dir):
+        raise FileExistsError(
+            f"Cannot create isolated profile '{canon}': the name is marked deleted."
+        )
     if profile_dir.exists() and not named_profile_has_identity(profile_dir):
         if named_profile_is_deleted(profile_dir):
             # Empty shell left by a post-delete mkdir: invisible to ``profile list``, safe to replace.
@@ -1450,12 +1457,13 @@ def create_profile(
         refusal = clone_channels_refusal(source_dir, clone_from or get_active_profile_name() or "default")
         if refusal:
             raise ValueError(refusal)
-    clear_named_profile_deleted(profile_dir)
+    if not create_isolated:
+        clear_named_profile_deleted(profile_dir)
     # Build in a hidden sibling and publish with one rename: a running multiplexer rescans profiles/
     # on every create and every 30 s, and ``_iter_named_profile_dirs`` only lists valid ids (no leading
     # dot), so it can never adopt the half-copied tree and start adapters on credentials the strip
     # below has not removed yet.
-    staging = _clone_staging_dir(profile_dir)
+    staging = _creation.clone_staging_dir(profile_dir)
     try:
         if clone_all and source_dir:
             _clone_all_into(source_dir, staging, canon)
@@ -1477,21 +1485,10 @@ def create_profile(
     # process. No-op on host (systemd/launchd/windows unit generation handles lifecycle).
     _maybe_register_gateway_service(canon)
     # A running multiplexer enumerates profiles/ at boot: ask it to serve this one now (it also
-    # rescans periodically, so a missed signal only delays serving).
-    _notify_multiplexer(canon)
+    # rescans periodically, so a missed signal only delays serving). Skipped during bootstrap isolation.
+    if not create_isolated:
+        _notify_multiplexer(canon)
     return profile_dir
-
-
-def _clone_staging_dir(profile_dir: Path) -> Path:
-    """Fresh ``profiles/.<name>.staging-<pid>`` beside the final dir (same filesystem, so the publish
-    rename is atomic). A leftover from a crashed create is discarded."""
-    staging = profile_dir.parent / f".{profile_dir.name}.staging-{os.getpid()}"
-    profile_dir.parent.mkdir(parents=True, exist_ok=True)
-    if staging.is_symlink() or staging.is_file():
-        staging.unlink()
-    elif staging.is_dir():
-        shutil.rmtree(staging, ignore_errors=True)
-    return staging
 
 
 def _finish_profile_layout(profile_dir: Path, *, no_skills: bool, clone_all: bool,

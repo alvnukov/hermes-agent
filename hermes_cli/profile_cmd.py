@@ -271,9 +271,9 @@ def _profile_create(args):
     print("\nNext steps:")
     print(f"  {name} setup              Configure API keys and model")
     print(f"  {name} chat               Start chatting")
-    from hermes_cli.gateway_multiplex_served import live_default_gateway_pid, recorded_served_profiles
+    from hermes_cli.profile_creation import served_profiles_for_creation
     from hermes_cli.profiles import normalize_profile_name
-    served = recorded_served_profiles() if live_default_gateway_pid() is not None else None
+    served = served_profiles_for_creation()
     if served is not None and normalize_profile_name(name) in {normalize_profile_name(p) for p in served}:
         print("  (served now by the running multiplexed gateway — add its bot token and it connects)")
     elif served is not None:
