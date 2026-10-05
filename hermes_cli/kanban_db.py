@@ -3460,7 +3460,7 @@ def request_review(
     expected_run_id: Optional[int] = None, force: bool = False, with_reason: bool = False,
     expected_task_fingerprint: Optional[str] = None,
 ):
-    """``running``/``ready`` -> ``review``; never touches block recurrence accounting.
+    """``running``/``ready`` -> ``review``; clears stale errors, preserves failure and block counters.
 
     Implementer and reviewer are recorded on the event so requested changes
     route back to the right profile; ``reviewer`` reassigns the task, and on
@@ -3552,7 +3552,7 @@ def request_review(
                    SET status        = 'review',
                        claim_lock    = NULL,
                        claim_expires = NULL,
-                       worker_pid    = NULL
+                       worker_pid    = NULL, last_failure_error = NULL
                 """ + assignee_sql + """
                  WHERE id = ?
                    AND status IN ('running', 'ready')
