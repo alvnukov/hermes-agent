@@ -825,56 +825,10 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
 
 
 def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
-    """Goal judge for every terminal worker handoff (including review).
-
-    Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` = judge ruled the goal
-    unachievable; ``"continue"``/``"wait"`` reject with the judge's reason. Judge failures allow
-    the handoff (logged).
-
-    See #100954.
-    ``{"done", None}`` means the judge allows the handoff; anything else is a rejection whose verdict
-    disambiguates the guidance the caller gives the worker (``continue`` = not done yet, ``blocked`` =
-    judged unachievable — see #100954).
-    """
-    if task is None or not task.goal_mode:
-        return ("done", None)
-    try:
-        from agent.auxiliary_client import get_text_auxiliary_client
-
-        client, model = get_text_auxiliary_client("goal_judge")
-    except Exception:
-        client, model = None, None
-    if client is None or not model:
-        return ("done", None)
-
-    from hermes_cli.goals import judge_goal
-
-    verdict, reason, transport_failed = "done", "", False
-    try:
-        # Headless handoff checks run outside any agent turn: bind the per-task relay-affinity
-        # scope (mirrors kanban_specify) so the relay does not reject the judge call (#113669).
-        from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
-        affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{task.id}")
-        try:
-            verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(),
-                last_response=evidence.strip())
-        finally:
-            if affinity_token is not None:
-                reset_affinity_scope(affinity_token)
-    except Exception as judge_exc:
-        import logging as _logging
-
-        _logging.getLogger(__name__).warning("goal judge check failed, allowing lifecycle handoff: %s",
-                                             judge_exc, exc_info=True)
-    if transport_failed:
-        # ``judge_goal`` fails open to ``continue`` on transport errors (relay 400, auth, timeout);
-        # an unreachable judge is not a human "not done" and must not reject the handoff (#83610).
-        import logging as _logging
-
-        _logging.getLogger(__name__).warning("goal judge unreachable (%s), allowing lifecycle handoff", reason)
-        return ("done", None)
-    return (verdict, None if verdict == "done" else reason)
+    """Completion compatibility adapter; the shared gate owns judge semantics."""
+    from hermes_cli.kanban_goal_gate import evaluate_kanban_handoff
+    decision = evaluate_kanban_handoff(None, task, operation="complete", evidence=evidence)
+    return decision.verdict, None if decision.allowed else decision.reason
 
 
 def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: str,
@@ -1000,8 +954,19 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 return f"{tid} → triage (unblock loop detected — {verdict}){suffix}"
             return f"Blocked {tid}{suffix}"
 
-        op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
-            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
+        def block(tid):
+            return kb.block_task(
+                conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
+                gate_rejection_event_id=getattr(args, "gate_rejection_event_id", None),
+            )
+        if kind == "policy_gate":
+            def op(tid):
+                accepted = block(tid)
+                if accepted and reason:
+                    kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
+                return accepted
+        else:
+            op = _commented(conn, reason, author, "BLOCKED", block)
         return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
 
 
@@ -1026,27 +991,42 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
+        from hermes_cli.kanban_db_holds import get_dispatch_hold
+        def resume(tid):
+            hold = get_dispatch_hold(conn, tid)
+            token = hold.get("hold_id") if hold and not os.environ.get("HERMES_KANBAN_TASK") else None
+            return kb.unblock_task(conn, tid, actor=author, reason=reason, expected_hold_id=token)
+        op = _commented(conn, reason, author, "UNBLOCK", resume)
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_goal_gate import evaluate_kanban_handoff
     tid = args.task_id
     summary = _stripped_or_none(getattr(args, "summary", None))
     metadata, rc = _parse_metadata_flag(getattr(args, "metadata", None))
     if rc:
         return rc
     with kbc.connect_closing() as conn:
-        gate_err = _goal_gate_error(
-            conn, tid, summary or "", "review handoff",
-            "Record the block with kanban block instead of requesting review.",
-            "Provide acceptance evidence matching the task.")
-        if gate_err:
-            return _err(gate_err)
+        try:
+            decision = evaluate_kanban_handoff(
+                conn, kb.get_task(conn, tid), operation="request_review", evidence=summary or "",
+                reviewer=getattr(args, "reviewer", None), metadata=metadata,
+            )
+        except ValueError as exc:
+            return _err(str(exc))
+        if not decision.allowed:
+            from hermes_cli.kanban_goal_gate import record_gate_rejection
+            rejection_id = record_gate_rejection(conn, tid, expected_run_id=_worker_run_id_for(tid), decision=decision)
+            identity = f" (gate_rejection_event_id={rejection_id})" if rejection_id is not None else ""
+            return _err(f"kanban: goal review handoff of {tid} rejected by judge: {decision.reason}{identity}. "
+                        "Provide author readiness evidence matching the task.")
+        metadata = {**(metadata or {}), "_kanban_handoff": decision.context}
         ok, reason = kb.request_review(
-            conn, tid, summary=summary, metadata=metadata, reviewer=getattr(args, "reviewer", None),
-            expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)), with_reason=True)
+            conn, tid, summary=summary, metadata=metadata, reviewer=decision.context["selected_reviewer"],
+            expected_run_id=_worker_run_id_for(tid), force=bool(getattr(args, "force", False)), with_reason=True,
+            expected_task_fingerprint=decision.task_fingerprint)
         if not ok:
             return _err(f"cannot request review for {tid}: {reason or 'not running/ready?'}")
         persisted_run = kb.latest_run(conn, tid)
@@ -1097,7 +1077,10 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     results: list[dict[str, object]] = []
     with kbc.connect_closing() as conn:
         for tid in ids:
-            ok, err = kb.promote_task(conn, tid, actor=author, reason=reason, dry_run=dry_run)
+            from hermes_cli.kanban_db_holds import get_dispatch_hold
+            hold = get_dispatch_hold(conn, tid)
+            token = hold.get("hold_id") if hold and not os.environ.get("HERMES_KANBAN_TASK") else None
+            ok, err = kb.promote_task(conn, tid, actor=author, reason=reason, dry_run=dry_run, expected_hold_id=token)
             results.append({"task_id": tid, "promoted": ok, "dry_run": dry_run,
                             "reason": reason, "error": err})
 

@@ -736,8 +736,35 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     )]
 
 
+def _rule_dispatch_hold(task, events, runs, now, cfg) -> list[Diagnostic]:
+    if _task_field(task, "status") in ("done", "archived"):
+        return []
+    hold = _task_field(task, "dispatch_hold")
+    if hold is None:
+        return []
+    if not isinstance(hold, dict):
+        from hermes_cli.kanban_db_holds import decode_dispatch_hold
+        hold = decode_dispatch_hold(hold)
+    kind = hold.get("kind", "invalid")
+    explanations = {
+        "block_loop": "Repeated blocking requires resolving the cause and an explicit operator resume.",
+        "manual_approval": "This child task requires its own operator approval before dispatch.",
+        "policy_gate": "A technical gate rejected the handoff. A relevant native gate revision can resume it once; an operator can also resolve the cause and resume explicitly.",
+        "invalid": "The stored hold is malformed. Inspect the event history and restore its native evidence before resuming.",
+    }
+    tid = _task_field(task, "id")
+    actions = ([_cli_hint(f"Inspect hold evidence: {tid}", f"hermes kanban events {tid}", suggested=True)]
+               if kind == "invalid" else [DiagnosticAction("unblock", "Resume after resolving cause", suggested=True)])
+    return [Diagnostic(
+        kind="dispatch_hold", severity="warning", title="Task dispatch is held",
+        detail=explanations.get(kind, explanations["invalid"]), actions=actions,
+        data={"hold_kind": kind, "hold_id": hold.get("hold_id"), "resume_status": hold.get("resume_status")},
+    )]
+
+
 # Order matters: earlier rules render first on severity ties.
 _RULES: list[RuleFn] = [
+    _rule_dispatch_hold,
     _rule_hallucinated_cards,
     _rule_triage_aux_unavailable,
     _rule_prose_phantom_refs,

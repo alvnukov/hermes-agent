@@ -314,6 +314,7 @@ _SPECS = [
     ], help="Edit task fields or recovery fields on an already-completed task"),
     _cmd("block", [
         _TASK_ID,
+        _arg("--gate-rejection-event-id", type=int, help="Fresh native mechanical rejection event required for policy_gate"),
         _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
         _bulk_ids("block"),
         _arg("--kind", choices=sorted(kb.VALID_BLOCK_KINDS),

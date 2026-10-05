@@ -339,8 +339,8 @@ def test_unbound_worker_cannot_mutate_card(monkeypatch, worker_env):
 
 def test_malformed_run_id_refused_but_nonlifecycle_allowed(monkeypatch, worker_env):
     """A malformed (non-integer) HERMES_KANBAN_RUN_ID is treated as unbound and
-    refuses run-lifecycle mutations, while non-lifecycle tools (heartbeat /
-    attach) that do not terminate a run stay available to the worker."""
+    refuses run-lifecycle mutations, including lease extension; ordinary
+    comments remain available to the worker."""
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
     from tools import kanban_tools as kt
@@ -353,8 +353,10 @@ def test_malformed_run_id_refused_but_nonlifecycle_allowed(monkeypatch, worker_e
     out = json.loads(kt._handle_schedule({"reason": "stale worker parks"}))
     assert "refused" in out.get("error", "")
 
-    # Non-lifecycle tools are NOT gated: heartbeat still extends the claim.
+    # Heartbeat must not extend a lease without ownership; metadata still works.
     out = json.loads(kt._handle_heartbeat({}))
+    assert "refused" in out.get("error", "")
+    out = json.loads(kt._handle_comment({"task_id": worker_env, "body": "Activity note"}))
     assert out.get("ok") is True
     with kbc.connect() as conn:
         assert kb.get_task(conn, worker_env).status == "running"
@@ -452,7 +454,7 @@ def test_schedule_parks_current_worker_with_reason(worker_env):
         run = kb.latest_run(conn, worker_env)
         assert (run.outcome, run.summary) == ("scheduled", reason)
         assert any(
-            event.kind == "scheduled" and event.payload == {"reason": reason}
+            event.kind == "scheduled" and event.payload == {"reason": reason, "resume_status": "ready"}
             for event in kb.list_events(conn, worker_env)
         )
 

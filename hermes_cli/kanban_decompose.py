@@ -339,5 +339,10 @@ def decompose_task(
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Return task ids currently in the triage column."""
     with kbc.connect_closing() as conn:
-        rows = kb.list_tasks(conn, status="triage", tenant=tenant, limit=1000)
-    return [row.id for row in rows]
+        query = "SELECT id FROM tasks WHERE status = 'triage' AND dispatch_hold IS NULL"
+        params = ()
+        if tenant is not None:
+            query += " AND tenant = ?"
+            params = (tenant,)
+        rows = conn.execute(query + " ORDER BY priority DESC, created_at ASC LIMIT 1000", params).fetchall()
+    return [row["id"] for row in rows]

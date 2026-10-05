@@ -427,9 +427,58 @@ orchestration attention. This is a deterministic DB guard, not an LLM judgment c
 a task's body text cannot opt out of it: the recurrence counter deliberately
 survives each unblock (it resets only on a successful `complete`). To keep an
 unblocked task in the work pool, resolve *why it keeps re-blocking* (unfinished
-parent, missing input, unmet capability) before unblocking, or raise
-`BLOCK_RECURRENCE_LIMIT` if the loop is expected.
+parent, missing input, unmet capability) before explicitly resuming it.
+
+Loop detection also creates a durable dispatch hold. Rewriting the task,
+adding comments, automatic specification or decomposition cannot clear it.
+An operator can resume it with `hermes kanban unblock <id> --reason "Cause resolved"`
+or an explicit move to Ready in the dashboard. The current hold is checked
+atomically, parents are rechecked, and the recorded author/reviewer phase
+is restored. Worker-bound commands cannot approve their own holds. Releasing
+a hold preserves failure and recurrence history.
 :::
+
+### Technical gate holds and legacy boards
+
+`request-review` evaluates author readiness for review separately from final
+completion. It includes reviewer/run context and the full goal up to 32000
+characters; a larger goal is rejected explicitly. Transport failures retain
+the existing handoff behavior. Supplied candidate references are stored as
+handoff evidence; this does not independently verify their contents.
+
+A worker can use `kind=policy_gate` only with the fresh
+`gate_rejection_event_id` returned by a mechanically blockable native rejection
+(oversized review input or unsupported persisted handoff context). A judge's
+negative verdict does not qualify. These tasks await a relevant code-owned
+gate revision or an explicit operator resolution; they do not claim a human
+answer is required. A revision change resumes the matching hold once, retaining
+dependencies and review phase. A new rejection establishes a new hold.
+
+Schema initialization adds the nullable hold column. Legacy data backfill is
+an explicit operation and never runs merely on import or schema initialization.
+After upgrading the schema, preview a **copy** of the board using read-only
+SQLite:
+
+```python
+import json
+import sqlite3
+from hermes_cli.kanban_db_holds import backfill_dispatch_holds
+
+with sqlite3.connect("file:/path/to/migrated-board-copy.db?mode=ro", uri=True) as conn:
+    conn.row_factory = sqlite3.Row
+    print(json.dumps(backfill_dispatch_holds(conn), indent=2))
+```
+
+The report lists `candidates`, `held`, `skipped` and `ambiguous`. Preview writes
+nothing. Apply requires an operator's native Kanban connection and an explicit
+`backfill_dispatch_holds(conn, dry_run=False)` call; repeated application is
+idempotent. Back up the board before applying. Only nonterminal cards with
+unresolved native loop evidence are held. Automatic promotion or unproven
+actor names do not prove operator resolution. Unrelated `needs_input` cards
+remain unchanged. Active runs continue; the hold prevents subsequent dispatch.
+Inspect `hermes kanban diagnostics` and the task's events before approving an
+ambiguous hold. A malformed hold remains blocked until its native evidence
+is repaired; it is never treated as an empty hold.
 
 ## Enabling tools for a chat profile
 
@@ -1013,7 +1062,7 @@ All commands are also available as a slash command in the interactive CLI and in
 | `kanban.max_in_progress` | unset (unlimited) | Caps the number of simultaneously running tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited. |
 | `kanban.max_in_progress_per_profile` | unset (unlimited) | Per-profile variant of `max_in_progress` — caps how many tasks any single assignee profile may run concurrently. Useful when one profile is slow or rate-limited but others should keep flowing. Applies alongside the board-wide `max_in_progress`; both must allow a spawn for it to proceed. |
 | `kanban.dispatch_profiles` | unset (any existing profile) | Per-home claim allowlist for boards shared across Hermes homes. When the key is present, this home's dispatcher only claims cards whose assignee is listed — fail-closed: an empty list, `null` or a bare `dispatch_profiles:` claims nothing, and a config read that fails logs a warning and claims nothing; other assignees land in `skipped_nonspawnable`. Only omitting the key means "any existing profile". `hermes kanban diagnostics` prints the resolved value for this home (`any`, the listed names, or `none (fail-closed: …)`). See [Shared boards across homes](#shared-boards-across-homes). |
-| `kanban.auto_promote_children` | `true` | After `decompose_triage_task()` produces children with no parent-blocker dependencies, they're automatically promoted to `ready` so the dispatcher can pick them up. Set to `false` to require manual review — children stay in `todo` until you promote them. |
+| `kanban.auto_promote_children` | `true` | After decomposition, children with satisfied parents are promoted to `ready`. Set to `false` to give every child a durable manual approval hold. Each child requires its own explicit operator promotion/resume with a reason; later ticks or completion of siblings cannot approve it. |
 | `kanban.default_workdir` | unset | Board-level default working directory applied to new tasks when neither `--workspace` nor the task itself overrides it. Per-task `workspace:` still wins. |
 
 ```yaml
@@ -1412,7 +1461,10 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | `blocked` | `{reason, kind, recurrences}` | Worker or human flipped the task to `blocked`. `kind` is the typed block reason (`needs_input`, `capability`, `transient`, or `null` for a generic block); `recurrences` is the unblock-loop counter. A `kind=dependency` block with no incomplete parent lands here as `needs_input` (payload adds `requested_kind: dependency`, `rekind_reason: no_open_parent`) because `todo` would only get it re-promoted and respawned on the next dispatch tick. Synthesizes a zero-duration run when called on a never-claimed task with `--reason`. |
 | `dependency_wait` | `{reason, kind}` or `{reason: parent_not_done, demoted: true, parent}` | Worker blocked with `kind=dependency` while at least one parent is still open — the task is only waiting on another task, so it routes to `todo` (parent-gated, auto-promoted) instead of `blocked` and no recurrence is counted. No human needed. Also emitted when `link`/`kanban_link` puts a `ready` child under a parent that is not `done`: the child drops back to `todo` and this event records why (the `ready → running` claim re-checks parents, so nothing can run it until the parent completes or the link is removed with `hermes kanban unlink`). |
 | `block_loop_detected` | `{reason, kind, recurrences, limit}` | A task was unblocked and re-blocked for the same reason `BLOCK_RECURRENCE_LIMIT` times (default 2). Instead of landing in `blocked` again — where a cron would keep unblocking it — it routes to `triage` for orchestration attention, breaking the unblock↔re-block loop. |
-| `unblocked` | — | `blocked → ready` (or `todo` if parents are still open), either manually or via `/unblock`. Resets the dispatcher's `consecutive_failures` but deliberately preserves `block_recurrences` so the loop breaker keeps its memory. `run_id` is `NULL`. |
+| `unblocked` | `{status?, resume_status?, wake_kind?}` | Restores `ready`/`review`, or waits in `todo` for parents. Legacy unblocks reset dispatch failures; hold releases preserve them. Recurrence history is preserved. `run_id` is `NULL`. |
+| `dispatch_held` | `{schema, hold_id, kind, cause_key, resume_status, source_event_id, context}` | A durable loop, manual approval or technical policy hold prevents both claim lanes and automatic specification/decomposition. |
+| `dispatch_hold_released` | `{hold_id, wake_kind, actor, evidence}` | An explicit operator or relevant gate revision released exactly this hold. It does not bypass parents. |
+| `goal_gate_rejected` | `{operation, gate_id, gate_revision, category, blockable, task_fingerprint, candidate_fingerprint, verdict, reason}` | A native rejection bound to the current task/run snapshot. Only mechanical blockable categories can authorize a policy hold. |
 | `archived` | — | Hidden from the default board. If the task was still running, carries the `run_id` of the run that was reclaimed as a side effect. |
 
 **Edits** (human-driven changes that aren't transitions):

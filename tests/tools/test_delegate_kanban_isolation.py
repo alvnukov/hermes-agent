@@ -53,7 +53,7 @@ def _make_running_kanban_task(monkeypatch, tmp_path):
         )
         claim = kb.claim_task(conn, tid)
         assert claim is not None
-        run_id = claim.id
+        run_id = claim.current_run_id
     finally:
         conn.close()
 
@@ -89,7 +89,7 @@ def test_delegated_child_context_suppresses_env_gated_kanban_tools(monkeypatch, 
     assert {n for n in names if n and n.startswith("kanban_")} == set()
 
 
-def test_build_child_agent_strips_kanban_toolset_even_when_parent_is_worker(monkeypatch):
+def test_build_child_agent_strips_kanban_toolset_even_when_parent_is_worker(monkeypatch, tmp_path):
     """Child construction must fail closed even if the parent exposes kanban."""
     captured = {}
 
@@ -99,6 +99,9 @@ def test_build_child_agent_strips_kanban_toolset_even_when_parent_is_worker(monk
             self.valid_tool_names = {"terminal"}
             self.session_id = "child-session"
 
+    # Keep cold-import recovery's marker probe inside this test's fake install.
+    from hermes_cli import _early_recovery
+    monkeypatch.setattr(_early_recovery, "_project_root", lambda: tmp_path)
     import run_agent
     from tools import delegate_tool
     import tools.delegate_tool_config as delegate_tool_config
