@@ -933,6 +933,10 @@ def _resolve_vertex_runtime(requested_provider: str) -> Dict[str, Any]:
 
 def _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model) -> Optional[Dict[str, Any]]:
     """Providers decided on the REQUESTED name alone, before custom / pool / generic paths."""
+    from hermes_cli.codex_account_routes import resolve_account_runtime
+    account = resolve_account_runtime(requested_provider, target_model)
+    if account is not None:
+        return account
     if requested_provider == "moa":
         return _runtime("moa", "chat_completions", "moa://local", "moa-virtual-provider", source="moa-virtual-provider",
                         requested_provider=requested_provider)

@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from hermes_cli.timeouts import get_provider_request_timeout
+from hermes_cli.codex_account_routes import primary_account_route
 from agent.message_sanitization import (
     _FULL_ARGS_LOG_BOUND, coalesce_tool_call_id, coerce_tool_name, tool_call_id_variants, tool_result_id_variants
 )
@@ -1424,8 +1425,7 @@ def _primary_quota_reopened_early(agent, primary_provider, primary_model, matche
 
 
 def restore_primary_runtime(agent) -> bool:
-    """Restore the primary runtime at the start of a new turn so fallback stays turn-scoped
-    (long-lived CLI agents and the gateway's cached agents)."""
+    """Restore the primary account and runtime at a new turn; fallback stays turn-scoped."""
     if not agent._fallback_activated:
         # Reset the index even without activation: a failed _try_activate_fallback() can strand
         # _fallback_index past the chain end and silently block future fallbacks (#20465).
@@ -1447,12 +1447,12 @@ def restore_primary_runtime(agent) -> bool:
     primary_runtime_base_url = str((rt or {}).get("base_url") or "")
 
     def _matches_primary(candidate) -> bool:
-        return credential_pool_matches_provider(candidate, primary_provider, base_url=primary_runtime_base_url)
+        return credential_pool_matches_provider(candidate, primary_account_route(rt), base_url=primary_runtime_base_url)
 
     def _load_primary_pool():
         """Load the primary provider's pool; None when absent or provider-mismatched."""
         from agent.credential_pool import load_pool
-        key = resolve_runtime_pool_key(primary_provider, primary_runtime_base_url)
+        key = resolve_runtime_pool_key(primary_account_route(rt), primary_runtime_base_url)
         loaded = load_pool(key) if key else None
         return loaded if loaded is not None and _matches_primary(loaded) else None
     if _primary_quota_reopened_early(agent, primary_provider, primary_model, _matches_primary, _load_primary_pool):

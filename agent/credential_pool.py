@@ -612,34 +612,6 @@ def get_pool_strategy(provider: str) -> str:
     return strategy if strategy in SUPPORTED_POOL_STRATEGIES else STRATEGY_FILL_FIRST
 
 
-def _keyed_custom_pool_matches(
-    pool_provider: str,
-    provider_norm: str,
-    base_url: Optional[str],
-) -> bool:
-    """Match a durable ``providers.<key>`` pool against runtime identities."""
-    runtime_url = _norm_url(base_url)
-    if not runtime_url:
-        return False
-    try:
-        for normalized_name, entry in _iter_custom_providers():
-            provider_key = _normalize_custom_pool_name(str(entry.get("provider_key") or ""))
-            if provider_key != pool_provider:
-                continue
-            aliases = _custom_entry_name_aliases(normalized_name, entry)
-            aliases.add(f"{CUSTOM_POOL_PREFIX}{normalized_name}")
-            if provider_key:
-                aliases.add(f"{CUSTOM_POOL_PREFIX}{provider_key}")
-            configured_url = _norm_url(entry.get("base_url"))
-            if provider_norm == "custom":
-                return runtime_url == configured_url
-            runtime_aliases = _requested_custom_name_aliases(provider_norm)
-            return bool(runtime_aliases & aliases) and runtime_url == configured_url
-    except Exception:
-        return False
-    return False
-
-
 def _legacy_custom_pool_matches(
     pool_provider: str,
     provider_norm: str,
@@ -697,6 +669,10 @@ def credential_pool_matches_provider(
     identities fail closed. Legacy pool adapters without a ``provider``
     attribute remain compatible; production pools are scoped.
     """
+    from hermes_cli.codex_account_routes import account_pool_matches
+    account_match = account_pool_matches(pool_or_provider, provider)
+    if account_match is not None:
+        return account_match
     raw_pool_provider = getattr(pool_or_provider, "provider", None)
     if raw_pool_provider is None:
         if not isinstance(pool_or_provider, str):
@@ -711,7 +687,8 @@ def credential_pool_matches_provider(
     if not pool_provider.startswith(CUSTOM_POOL_PREFIX):
         if pool_provider == provider_norm:
             return True
-        return _keyed_custom_pool_matches(pool_provider, provider_norm, base_url)
+        from agent.credential_pool_routing import keyed_custom_pool_matches
+        return keyed_custom_pool_matches(pool_provider, provider_norm, base_url)
     if provider_norm == "custom":
         try:
             matched_pool = get_custom_provider_pool_key(base_url or "")
@@ -3054,6 +3031,10 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
+    from hermes_cli.codex_account_routes import account_route_pool
+    account = account_route_pool(provider)
+    if account is not None:
+        return account
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS:
         # One-time heal for installs that forked this grant across profiles
         # before the clone-strip / root write-through existed (#100339).

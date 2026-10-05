@@ -68,8 +68,10 @@ def _both_first_class(a: BackendIdentity, b: BackendIdentity) -> bool:
         return False
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
+        from hermes_cli.codex_account_routes import canonical_codex_provider
 
-        return a.provider in PROVIDER_REGISTRY and b.provider in PROVIDER_REGISTRY
+        return (canonical_codex_provider(a.provider) in PROVIDER_REGISTRY
+                and canonical_codex_provider(b.provider) in PROVIDER_REGISTRY)
     except Exception:
         return False
 
