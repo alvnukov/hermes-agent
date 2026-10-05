@@ -312,10 +312,58 @@ export function deleteCustomEndpoint(id: string, profile?: null | string): Promi
   })
 }
 
-export function listOAuthProviders(profile?: ProfileScope): Promise<OAuthProvidersResponse> {
-  return window.hermesDesktop.api<OAuthProvidersResponse>({
-    ...capabilityScoped(profile),
+export async function listOAuthProviders(profile?: ProfileScope): Promise<OAuthProvidersResponse> {
+  const origin = capabilityScoped(profile)
+
+  const response = await window.hermesDesktop.api<OAuthProvidersResponse>({
+    ...origin,
     path: '/api/providers/oauth'
+  })
+
+  for (const provider of response.providers) {
+    bindConfigReadOrigin(provider, origin)
+  }
+
+  return response
+}
+
+export function updateOAuthAccount(
+  providerId: string,
+  accountId: string,
+  update: { enabled?: boolean; label?: string; priority?: number },
+  profile?: ProfileScope
+): Promise<{ ok: boolean }> {
+  return window.hermesDesktop.api<{ ok: boolean }>({
+    ...capabilityScoped(profile),
+    path: `/api/providers/oauth/${encodeURIComponent(providerId)}/accounts/${encodeURIComponent(accountId)}`,
+    method: 'PATCH',
+    body: update
+  })
+}
+
+export function deleteOAuthAccount(
+  providerId: string,
+  accountId: string,
+  profile?: ProfileScope
+): Promise<{ ok: boolean }> {
+  return window.hermesDesktop.api<{ ok: boolean }>({
+    ...capabilityScoped(profile),
+    path: `/api/providers/oauth/${encodeURIComponent(providerId)}/accounts/${encodeURIComponent(accountId)}`,
+    method: 'DELETE'
+  })
+}
+
+export function linkOAuthAccount(
+  providerId: string,
+  ownerProfile: string,
+  accountId: string,
+  profile?: ProfileScope
+): Promise<{ ok: boolean }> {
+  return window.hermesDesktop.api<{ ok: boolean }>({
+    ...capabilityScoped(profile),
+    path: `/api/providers/oauth/${encodeURIComponent(providerId)}/accounts/link`,
+    method: 'POST',
+    body: { owner_profile: ownerProfile, account_id: accountId }
   })
 }
 
@@ -330,10 +378,14 @@ export function disconnectOAuthProvider(
   })
 }
 
-export function startOAuthLogin(providerId: string, profile?: ProfileScope): Promise<OAuthStartResponse> {
+export function startOAuthLogin(
+  providerId: string,
+  profile?: ProfileScope,
+  addAccount = false
+): Promise<OAuthStartResponse> {
   return window.hermesDesktop.api<OAuthStartResponse>({
     ...capabilityScoped(profile),
-    path: `/api/providers/oauth/${encodeURIComponent(providerId)}/start`,
+    path: `/api/providers/oauth/${encodeURIComponent(providerId)}/start${addAccount ? '?add_account=true' : ''}`,
     method: 'POST',
     body: {}
   })

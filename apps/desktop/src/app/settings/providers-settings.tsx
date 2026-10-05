@@ -1,7 +1,9 @@
 import { useStore } from '@nanostores/react'
 import type { ReactNode } from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import type { ProfileScope } from '@/api/client'
+import { peekConfigReadOrigin } from '@/api/config'
 import { runInTerminal } from '@/app/right-sidebar/store'
 import {
   FEATURED_ID,
@@ -13,13 +15,23 @@ import {
   providerTitle,
   sortProviders
 } from '@/components/onboarding'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { RowButton } from '@/components/ui/row-button'
 import { SearchField } from '@/components/ui/search-field'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { Tip } from '@/components/ui/tooltip'
-import { disconnectOAuthProvider, listOAuthProviders } from '@/hermes'
+import {
+  deleteOAuthAccount,
+  disconnectOAuthProvider,
+  linkOAuthAccount,
+  listOAuthProviders,
+  updateOAuthAccount
+} from '@/hermes'
 import { useI18n } from '@/i18n'
-import { Check, ChevronDown, ChevronRight, KeyRound, Loader2, Terminal, Trash2 } from '@/lib/icons'
+import { Check, ChevronDown, ChevronRight, ChevronUp, KeyRound, Loader2, Pencil, Terminal, Trash2 } from '@/lib/icons'
 import { normalize } from '@/lib/text'
 import { cn } from '@/lib/utils'
 import { confirm } from '@/store/confirm'
@@ -27,7 +39,7 @@ import { $localModelsEnabled } from '@/store/local-models-flag'
 import { notify, notifyError } from '@/store/notifications'
 import { $desktopOnboarding, startManualLocalEndpoint, startManualProviderOAuth } from '@/store/onboarding'
 import { $settingsRequestProfile } from '@/store/settings-scope'
-import type { EnvVarInfo, OAuthProvider } from '@/types/hermes'
+import type { EnvVarInfo, OAuthAccount, OAuthProvider } from '@/types/hermes'
 
 import { isKeyVar, ProviderKeyRows } from './credential-key-ui'
 import { CustomEndpointsSettings } from './custom-endpoints-settings'
@@ -155,6 +167,7 @@ function buildProviderKeyGroups(vars: Record<string, EnvVarInfo>): ProviderKeyGr
 function OAuthPicker({
   disconnecting,
   onDisconnect,
+  onRefresh,
   onTerminalDisconnect,
   onWantApiKey,
   onWantLocalModels,
@@ -163,6 +176,7 @@ function OAuthPicker({
 }: {
   disconnecting: null | string
   onDisconnect: (provider: OAuthProvider) => void
+  onRefresh: (provider: OAuthProvider) => Promise<void>
   onTerminalDisconnect: (provider: OAuthProvider) => void
   onWantApiKey: () => void
   onWantLocalModels: () => void
@@ -182,7 +196,9 @@ function OAuthPicker({
 
   // The free tier holds a token but no account: it is never "connected"; the featured Nous row
   // names it (Nous · free tier) and offers the sign-in that keeps its connectors.
-  const isConnected = (p: OAuthProvider) => Boolean(p.status?.logged_in) && p.status?.free_tier !== true
+  const isConnected = (p: OAuthProvider) =>
+    (Boolean(p.status?.logged_in) || Boolean(p.accounts?.length)) && p.status?.free_tier !== true
+
   const featured = ordered.find(p => p.id === FEATURED_ID && !isConnected(p)) ?? null
   const rest = featured ? ordered.filter(p => p.id !== FEATURED_ID) : ordered
   // Keep connected accounts grouped and always visible; only the unconnected
@@ -218,14 +234,23 @@ function OAuthPicker({
         <>
           <GroupLabel>{p.connected}</GroupLabel>
           {connected.map(p => (
-            <ConnectedProviderRow
-              disconnecting={disconnecting === p.id}
-              key={p.id}
-              onDisconnect={onDisconnect}
-              onSelect={select}
-              onTerminalDisconnect={onTerminalDisconnect}
-              provider={p}
-            />
+            <Fragment key={p.id}>
+              <ConnectedProviderRow
+                disconnecting={disconnecting === p.id}
+                onDisconnect={onDisconnect}
+                onSelect={select}
+                onTerminalDisconnect={onTerminalDisconnect}
+                provider={p}
+              />
+              {(p.supports_add_account || p.supports_account_management) && (
+                <ProviderAccounts
+                  key={`${profile}:${p.id}`}
+                  onRefresh={() => onRefresh(p)}
+                  profile={profile}
+                  provider={p}
+                />
+              )}
+            </Fragment>
           ))}
         </>
       )}
@@ -233,7 +258,17 @@ function OAuthPicker({
         <>
           {connected.length > 0 && <GroupLabel>{p.otherProviders}</GroupLabel>}
           {others.map(p => (
-            <ProviderRow key={p.id} onSelect={select} provider={p} />
+            <Fragment key={p.id}>
+              <ProviderRow onSelect={select} provider={p} />
+              {p.supports_account_management && (
+                <ProviderAccounts
+                  key={`${profile}:${p.id}`}
+                  onRefresh={() => onRefresh(p)}
+                  profile={profile}
+                  provider={p}
+                />
+              )}
+            </Fragment>
           ))}
           <FireworksProviderRow onClick={onWantApiKey} />
           <OpenRouterProviderRow onClick={onWantApiKey} />
@@ -255,6 +290,297 @@ function OAuthPicker({
   )
 }
 
+function ProviderAccounts({
+  provider,
+  profile,
+  onRefresh
+}: {
+  provider: OAuthProvider
+  profile?: string
+  onRefresh: () => Promise<void>
+}) {
+  const { t } = useI18n()
+  const copy = t.settings.providers
+  const scope = peekConfigReadOrigin(provider) ?? profile
+  const accounts = [...(provider.accounts ?? [])].sort((a, b) => a.priority - b.priority)
+
+  const available =
+    provider.available_accounts?.filter(
+      account =>
+        account.owner_profile &&
+        !accounts.some(
+          linked =>
+            linked.owner_profile === account.owner_profile &&
+            (linked.owner_credential_id ?? linked.id) === (account.owner_credential_id ?? account.id)
+        )
+    ) ?? []
+
+  const [selected, setSelected] = useState('')
+  const [linking, setLinking] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const accountKey = (account: OAuthAccount) => JSON.stringify([account.owner_profile, account.id])
+
+  async function handleLink() {
+    const account = available.find(account => accountKey(account) === selected)
+
+    if (!account?.owner_profile || linking) {
+      return
+    }
+
+    setLinking(true)
+    setError(null)
+
+    try {
+      const result = await linkOAuthAccount(provider.id, account.owner_profile, account.id, scope)
+
+      if (!result.ok) {
+        throw new Error(copy.accountWriteFailed)
+      }
+
+      await onRefresh()
+      setSelected('')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setLinking(false)
+    }
+  }
+
+  return (
+    <div className="grid gap-2 px-3 pb-3">
+      <ol aria-label={providerTitle(provider)} className="grid gap-2">
+        {accounts.map((account, index) => (
+          <ProviderAccountRow
+            account={account}
+            key={account.id}
+            management={Boolean(provider.supports_account_management)}
+            nextPriority={accounts[index + 1]?.priority}
+            onRefresh={onRefresh}
+            previousPriority={accounts[index - 1]?.priority}
+            providerId={provider.id}
+            scope={scope}
+          />
+        ))}
+      </ol>
+      {provider.supports_account_management && available.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Select disabled={linking} onValueChange={setSelected} value={selected}>
+            <SelectTrigger aria-label={copy.existingAccount} className="min-w-0 flex-1">
+              <SelectValue placeholder={copy.existingAccount} />
+            </SelectTrigger>
+            <SelectContent>
+              {available.map(account => (
+                <SelectItem key={accountKey(account)} value={accountKey(account)}>
+                  {account.label} · {account.owner_profile}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button disabled={!selected || linking} onClick={() => void handleLink()} size="sm" variant="outline">
+            {copy.linkAccount}
+          </Button>
+        </div>
+      )}
+      {error && (
+        <p className="text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+      {provider.supports_add_account && (
+        <>
+          <Button onClick={() => startManualProviderOAuth(provider.id, scope, true)} size="sm" variant="outline">
+            {copy.addAccount}
+          </Button>
+          <p className="text-xs text-muted-foreground">{copy.accountLoginHint}</p>
+        </>
+      )}
+    </div>
+  )
+}
+
+function providerAccountStatus(account: OAuthAccount) {
+  if (account.missing) return 'unavailable'
+  if (account.enabled === false || account.owner_enabled === false) return 'disabled'
+  if (account.last_status === 'dead' || account.last_status === 'exhausted') return account.last_status
+
+  return 'ready'
+}
+
+function ProviderAccountRow({
+  account,
+  management,
+  nextPriority,
+  onRefresh,
+  previousPriority,
+  providerId,
+  scope
+}: {
+  account: OAuthAccount
+  management: boolean
+  nextPriority?: number
+  onRefresh: () => Promise<void>
+  previousPriority?: number
+  providerId: string
+  scope: ProfileScope
+}) {
+  const { t } = useI18n()
+  const copy = t.settings.providers
+  const [editing, setEditing] = useState(false)
+  const [label, setLabel] = useState(account.label)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const profile = typeof scope === 'object' ? scope?.profile : scope
+  const shared = account.shared ?? Boolean(account.owner_profile && account.owner_profile !== profile)
+
+  const status = providerAccountStatus(account)
+
+  async function write(request: () => Promise<{ ok: boolean }>) {
+    setPending(true)
+    setError(null)
+
+    try {
+      const result = await request()
+
+      if (!result.ok) {
+        throw new Error(copy.accountWriteFailed)
+      }
+
+      await onRefresh()
+      setEditing(false)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : String(error))
+      throw error
+    } finally {
+      setPending(false)
+    }
+  }
+
+  const update = (value: { enabled?: boolean; label?: string; priority?: number }) =>
+    void write(() => updateOAuthAccount(providerId, account.id, value, scope)).catch(() => undefined)
+
+  function remove() {
+    void confirm({
+      confirmLabel: shared ? copy.unlinkAccount : copy.deleteAccount,
+      description: shared ? copy.unlinkAccountHint : copy.deleteAccountHint,
+      destructive: true,
+      title: shared ? copy.unlinkAccountConfirm(account.label) : copy.deleteAccountConfirm(account.label),
+      onConfirm: () => write(() => deleteOAuthAccount(providerId, account.id, scope))
+    })
+  }
+
+  return (
+    <li aria-label={account.label} className="grid gap-2 text-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="grid min-w-0 gap-1">
+          <span className="break-all">{account.label}</span>
+          <span className="text-xs text-muted-foreground">
+            {copy.accountPriority(account.priority + 1)} · {account.id}
+          </span>
+          {shared && account.owner_profile && (
+            <span className="text-xs text-muted-foreground">{copy.accountOwnerProfile(account.owner_profile)}</span>
+          )}
+          {account.missing ? (
+            <span className="text-xs text-destructive">{copy.accountUnavailableHint}</span>
+          ) : (
+            account.owner_enabled === false && (
+              <span className="text-xs text-muted-foreground">{copy.ownerAccountDisabled}</span>
+            )
+          )}
+        </div>
+        {management && (
+          <div className="flex items-center gap-1">
+            <Badge size="xs" variant={status === 'dead' ? 'destructive' : status === 'exhausted' ? 'warn' : 'muted'}>
+              {copy.accountStatus[status]}
+            </Badge>
+            <Switch
+              aria-label={copy.useAccount}
+              checked={(account.configured_enabled ?? account.enabled) !== false}
+              disabled={pending}
+              onCheckedChange={enabled => update({ enabled })}
+              size="xs"
+            />
+            <Tip label={copy.renameAccount}>
+              <Button
+                aria-label={copy.renameAccount}
+                disabled={pending}
+                onClick={() => {
+                  setLabel(account.label)
+                  setEditing(true)
+                }}
+                size="icon-xs"
+                variant="ghost"
+              >
+                <Pencil />
+              </Button>
+            </Tip>
+            <Tip label={copy.moveAccountUp}>
+              <Button
+                aria-label={copy.moveAccountUp}
+                disabled={pending || previousPriority === undefined}
+                onClick={() => update({ priority: previousPriority })}
+                size="icon-xs"
+                variant="ghost"
+              >
+                <ChevronUp />
+              </Button>
+            </Tip>
+            <Tip label={copy.moveAccountDown}>
+              <Button
+                aria-label={copy.moveAccountDown}
+                disabled={pending || nextPriority === undefined}
+                onClick={() => update({ priority: nextPriority })}
+                size="icon-xs"
+                variant="ghost"
+              >
+                <ChevronDown />
+              </Button>
+            </Tip>
+            <Tip label={shared ? copy.unlinkAccount : copy.deleteAccount}>
+              <Button
+                aria-label={shared ? copy.unlinkAccount : copy.deleteAccount}
+                disabled={pending}
+                onClick={remove}
+                size="icon-xs"
+                variant="ghost"
+              >
+                <Trash2 />
+              </Button>
+            </Tip>
+          </div>
+        )}
+      </div>
+      {editing && (
+        <form
+          className="flex items-center gap-2"
+          onSubmit={event => {
+            event.preventDefault()
+            update({ label: label.trim() })
+          }}
+        >
+          <Input
+            aria-label={copy.accountName}
+            autoFocus
+            disabled={pending}
+            onChange={event => setLabel(event.target.value)}
+            value={label}
+          />
+          <Button disabled={pending || !label.trim()} size="sm" type="submit" variant="outline">
+            {t.common.save}
+          </Button>
+          <Button disabled={pending} onClick={() => setEditing(false)} size="sm" type="button" variant="text">
+            {t.common.cancel}
+          </Button>
+        </form>
+      )}
+      {error && (
+        <p className="text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      )}
+    </li>
+  )
+}
+
 function ConnectedProviderRow({
   disconnecting,
   onDisconnect,
@@ -273,12 +599,13 @@ function ConnectedProviderRow({
   const title = providerTitle(provider)
   const Trail = provider.flow === 'external' ? Terminal : ChevronRight
   // Hermes can clear this provider's creds via the API.
-  const canDisconnect = provider.disconnectable ?? provider.flow !== 'external'
+  const managed = Boolean(provider.supports_account_management)
+  const canDisconnect = !managed && (provider.disconnectable ?? provider.flow !== 'external')
   // External (CLI-managed) provider Hermes can't clear via the API, but ships a
   // command we can run in the embedded terminal (Electron shell only).
-  const terminalDisconnect = !canDisconnect && Boolean(provider.disconnect_command) && canRunInTerminal()
+  const terminalDisconnect = !managed && !canDisconnect && Boolean(provider.disconnect_command) && canRunInTerminal()
   // Only fall back to a static "remove it elsewhere" hint when we offer no button.
-  const showHint = !canDisconnect && !terminalDisconnect
+  const showHint = !managed && !canDisconnect && !terminalDisconnect
 
   return (
     <div className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1 rounded-[6px] transition-colors hover:bg-(--ui-control-hover-background)">
@@ -395,6 +722,12 @@ export function ProvidersSettings({
   const scopeProfile = useStore($settingsRequestProfile)
   const { rowProps, vars } = useEnvCredentials(scopeProfile)
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([])
+  const oauthProvidersRef = useRef(oauthProviders)
+  oauthProvidersRef.current = oauthProviders
+  const oauthReadVersion = useRef(0)
+  const [oauthLoading, setOauthLoading] = useState(true)
+  const [oauthError, setOauthError] = useState<string | null>(null)
+  const [oauthRetry, setOauthRetry] = useState(0)
   const [openProvider, setOpenProvider] = useState<null | string>(null)
   const [disconnecting, setDisconnecting] = useState<null | string>(null)
   // Free-text filter for the API-keys view (provider name / env-var key / desc).
@@ -416,7 +749,7 @@ export function ProvidersSettings({
     return byEnv
   }, [vars])
 
-  const apiKeysShown = view === 'keys' || (oauthProviders.length === 0 && view !== 'custom-endpoints')
+  const apiKeysShown = view === 'keys'
 
   // Deep link from a rejected-key error card (?pview=keys&key=<ENV_KEY>):
   // clear the filter, expand that provider's card and scroll to it.
@@ -430,33 +763,71 @@ export function ProvidersSettings({
     ready: key => apiKeysShown && keyGroupByEnv.has(key)
   })
 
-  const refreshOAuthProviders = useCallback(async () => {
-    // OAuth providers are best-effort — a failure here just hides the panel.
-    const { providers } = await listOAuthProviders(scopeProfile)
-    setOauthProviders(providers)
-  }, [scopeProfile])
+  const refreshOAuthProviders = useCallback(
+    async (provider?: OAuthProvider) => {
+      const origin = peekConfigReadOrigin(provider)
+
+      if (
+        provider &&
+        !oauthProvidersRef.current.some(current => {
+          const currentOrigin = peekConfigReadOrigin(current)
+
+          return (
+            current === provider ||
+            Boolean(
+              origin &&
+              currentOrigin &&
+              origin.connectionId === currentOrigin.connectionId &&
+              origin.profile === currentOrigin.profile
+            )
+          )
+        })
+      ) {
+        return
+      }
+
+      const version = ++oauthReadVersion.current
+      const { providers } = await listOAuthProviders(origin ?? scopeProfile)
+
+      if (version === oauthReadVersion.current) {
+        setOauthProviders(providers)
+      }
+    },
+    [scopeProfile]
+  )
 
   useEffect(() => {
     let cancelled = false
+    const version = ++oauthReadVersion.current
 
     void (async () => {
       if (onboardingActive) {
         return
       }
 
+      setOauthLoading(true)
+      setOauthError(null)
+      setOauthProviders([])
+
       try {
         const { providers } = await listOAuthProviders(scopeProfile)
 
-        if (!cancelled) {
+        if (!cancelled && version === oauthReadVersion.current) {
           setOauthProviders(providers)
         }
-      } catch {
-        // Ignore — the OAuth panel just won't render.
+      } catch (error) {
+        if (!cancelled && version === oauthReadVersion.current) {
+          setOauthError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled && version === oauthReadVersion.current) {
+          setOauthLoading(false)
+        }
       }
     })()
 
     return () => void (cancelled = true)
-  }, [onboardingActive, scopeProfile])
+  }, [onboardingActive, scopeProfile, oauthRetry])
 
   // External (CLI-managed) providers can't be cleared via the API by design —
   // Hermes never deletes creds another tool owns behind a silent API call.
@@ -529,16 +900,13 @@ export function ProvidersSettings({
     }
   }
 
-  if (!vars) {
+  if (!vars && view === 'keys') {
     return <SettingsSkeleton search sections={[{ rows: 6 }]} />
   }
 
-  const hasOauth = oauthProviders.length > 0
-  // The sidebar subnav owns the Accounts/API-keys split now; with no OAuth
-  // providers there's nothing for the "Accounts" view to show, so fall to keys.
-  const showApiKeys = view === 'keys' || (!hasOauth && view !== 'custom-endpoints')
+  const showApiKeys = view === 'keys'
 
-  const keyGroups = buildProviderKeyGroups(vars)
+  const keyGroups = buildProviderKeyGroups(vars ?? {})
 
   if (showApiKeys) {
     const q = normalize(keyQuery)
@@ -605,15 +973,29 @@ export function ProvidersSettings({
   return (
     <SettingsContent>
       <SettingsProfileScope className="mb-5" />
-      <OAuthPicker
-        disconnecting={disconnecting}
-        onDisconnect={provider => void handleDisconnect(provider)}
-        onTerminalDisconnect={provider => void handleTerminalDisconnect(provider)}
-        onWantApiKey={() => onViewChange('keys')}
-        onWantLocalModels={() => onViewChange('local')}
-        profile={scopeProfile}
-        providers={oauthProviders}
-      />
+      {oauthLoading ? (
+        <p role="status">{t.settings.providers.loading}</p>
+      ) : oauthError ? (
+        <div className="grid gap-2" role="alert">
+          <p>{oauthError}</p>
+          <Button onClick={() => setOauthRetry(n => n + 1)} size="sm" variant="outline">
+            {t.common.retry}
+          </Button>
+        </div>
+      ) : oauthProviders.length === 0 ? (
+        <p>{t.settings.providers.noAccounts}</p>
+      ) : (
+        <OAuthPicker
+          disconnecting={disconnecting}
+          onDisconnect={provider => void handleDisconnect(provider)}
+          onRefresh={refreshOAuthProviders}
+          onTerminalDisconnect={provider => void handleTerminalDisconnect(provider)}
+          onWantApiKey={() => onViewChange('keys')}
+          onWantLocalModels={() => onViewChange('local')}
+          profile={scopeProfile}
+          providers={oauthProviders}
+        />
+      )}
     </SettingsContent>
   )
 }

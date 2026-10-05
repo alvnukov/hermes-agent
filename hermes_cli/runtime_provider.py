@@ -641,10 +641,22 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: Dict[s
         pool = load_pool(provider) if should_use_pool else None
     except Exception:
         pool = None
-    if not (pool and pool.has_credentials()):
-        return None
-    entry = pool.select(model=target_model or None)
+    has_credentials = bool(pool and pool.has_credentials())
+    entry = pool.select(model=target_model or None) if has_credentials else None
     if entry is None:
+        if provider == "openai-codex":
+            selections = auth_mod._load_auth_store().get("credential_pool_selections", {})
+            managed = isinstance(selections, dict) and selections.get(provider) is True
+            controlled = pool is not None and has_credentials and any(
+                not getattr(row, "enabled", True) or getattr(row, "source", "") == "shared"
+                for row in pool.entries()
+            )
+            if managed or controlled:
+                raise AuthError(
+                    "No enabled Codex account is available for this profile. "
+                    "Enable or connect an account in Providers → Accounts.",
+                    provider=provider, code="account_unavailable",
+                )
         return None
     pool_api_key = _pool_entry_api_key(entry)
     if provider == "nous":

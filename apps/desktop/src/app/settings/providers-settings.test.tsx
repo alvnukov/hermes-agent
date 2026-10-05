@@ -3,12 +3,16 @@ import { atom } from 'nanostores'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { bindConfigReadOrigin } from '@/api/config'
 import { ConfirmHost } from '@/components/confirm-host'
 import { $confirmRequest } from '@/store/confirm'
 import type { EnvVarInfo, OAuthProvider } from '@/types/hermes'
 
 const listOAuthProviders = vi.fn()
 const disconnectOAuthProvider = vi.fn()
+const updateOAuthAccount = vi.fn()
+const deleteOAuthAccount = vi.fn()
+const linkOAuthAccount = vi.fn()
 const getEnvVars = vi.fn()
 const revealEnvVar = vi.fn()
 const setEnvVar = vi.fn()
@@ -28,6 +32,9 @@ vi.mock('@/hermes', () => ({
   setApiRequestProfile: vi.fn(),
   getProfiles: async () => ({ profiles: (await import('@/store/profile')).$profiles.get() }),
   disconnectOAuthProvider: (...args: unknown[]) => disconnectOAuthProvider(...args),
+  updateOAuthAccount: (...args: unknown[]) => updateOAuthAccount(...args),
+  deleteOAuthAccount: (...args: unknown[]) => deleteOAuthAccount(...args),
+  linkOAuthAccount: (...args: unknown[]) => linkOAuthAccount(...args),
   getEnvVars: (...args: unknown[]) => getEnvVars(...args),
   listOAuthProviders: (...args: unknown[]) => listOAuthProviders(...args),
   revealEnvVar: (key: string, profile?: string) => revealEnvVar(key, profile),
@@ -84,6 +91,9 @@ beforeEach(() => {
   onboarding.set({ manual: false })
   getEnvVars.mockResolvedValue({})
   disconnectOAuthProvider.mockResolvedValue({ ok: true, provider: 'nous' })
+  updateOAuthAccount.mockResolvedValue({ ok: true })
+  deleteOAuthAccount.mockResolvedValue({ ok: true })
+  linkOAuthAccount.mockResolvedValue({ ok: true })
   revealEnvVar.mockResolvedValue({ value: 'old-secret' })
   setEnvVar.mockResolvedValue({ ok: true })
   listOAuthProviders.mockResolvedValue({
@@ -115,6 +125,369 @@ async function renderProvidersSettings() {
 }
 
 describe('ProvidersSettings', () => {
+  function managedProvider(patch: Partial<OAuthProvider> = {}) {
+    const value = provider('openai-codex', true, {
+      name: 'OpenAI Codex',
+      supports_add_account: true,
+      supports_account_management: true,
+      accounts: [
+        { id: 'stable-first', label: 'Work', priority: 0, enabled: true, last_status: null },
+        { id: 'stable-second', label: 'Personal', priority: 1, enabled: false, last_status: 'exhausted' }
+      ],
+      ...patch
+    })
+
+    bindConfigReadOrigin(value, { connectionId: 'connection-a', profile: 'beta' })
+
+    return value
+  }
+
+  it('uses per-account removal instead of the legacy provider disconnect for managed accounts', async () => {
+    listOAuthProviders.mockResolvedValue({ providers: [managedProvider()] })
+    await renderProvidersSettings()
+    expect(screen.queryByRole('button', { name: 'Remove ChatGPT or Codex Subscription' })).toBeNull()
+    expect(
+      within(screen.getByRole('listitem', { name: 'Work' })).getByRole('button', { name: 'Delete account' })
+    ).toBeTruthy()
+  })
+
+  it('toggles an account by stable id in the captured scope and waits for server truth', async () => {
+    const value = managedProvider()
+    let completeRefresh!: (response: { providers: OAuthProvider[] }) => void
+    listOAuthProviders.mockResolvedValueOnce({ providers: [value] }).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          completeRefresh = resolve
+        })
+    )
+    await renderProvidersSettings()
+    const row = screen.getByRole('listitem', { name: 'Personal' })
+    fireEvent.click(within(row).getByRole('switch', { name: 'Use in this profile' }))
+    await waitFor(() =>
+      expect(updateOAuthAccount).toHaveBeenCalledWith(
+        'openai-codex',
+        'stable-second',
+        { enabled: true },
+        { connectionId: 'connection-a', profile: 'beta' }
+      )
+    )
+    expect(within(row).getByRole('switch').getAttribute('aria-checked')).toBe('false')
+    expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(true)
+    expect(listOAuthProviders).toHaveBeenLastCalledWith({ connectionId: 'connection-a', profile: 'beta' })
+    await act(async () =>
+      completeRefresh({
+        providers: [
+          managedProvider({
+            accounts: [{ id: 'stable-second', label: 'Personal', priority: 0, enabled: true, last_status: 'exhausted' }]
+          })
+        ]
+      })
+    )
+    expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('Exhausted')).toBeTruthy()
+  })
+
+  it('renames and reorders individual accounts, then reloads the list', async () => {
+    const value = managedProvider()
+    listOAuthProviders.mockResolvedValue({ providers: [value] })
+    await renderProvidersSettings()
+    const row = screen.getByRole('listitem', { name: 'Personal' })
+    fireEvent.click(within(row).getByRole('button', { name: 'Rename account' }))
+    fireEvent.change(within(row).getByRole('textbox', { name: 'Account name' }), { target: { value: 'Home' } })
+    fireEvent.click(within(row).getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(updateOAuthAccount).toHaveBeenCalledWith(
+        'openai-codex',
+        'stable-second',
+        { label: 'Home' },
+        { connectionId: 'connection-a', profile: 'beta' }
+      )
+    )
+    await waitFor(() => expect(within(row).queryByRole('textbox')).toBeNull())
+    fireEvent.click(within(row).getByRole('button', { name: 'Move up' }))
+    await waitFor(() =>
+      expect(updateOAuthAccount).toHaveBeenCalledWith(
+        'openai-codex',
+        'stable-second',
+        { priority: 0 },
+        { connectionId: 'connection-a', profile: 'beta' }
+      )
+    )
+    expect(listOAuthProviders).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    { shared: false, label: 'Delete account', title: 'Delete Work?' },
+    { shared: true, label: 'Unlink from profile', title: 'Unlink Work from this profile?' }
+  ])('confirms $label and removes only the selected stable account id', async ({ shared, label, title }) => {
+    listOAuthProviders.mockResolvedValue({
+      providers: [
+        managedProvider({
+          accounts: [
+            {
+              id: 'stable-first',
+              label: 'Work',
+              priority: 0,
+              enabled: true,
+              owner_profile: shared ? 'team' : 'beta',
+              shared
+            }
+          ]
+        })
+      ]
+    })
+    await renderProvidersSettings()
+    const row = screen.getByRole('listitem', { name: 'Work' })
+
+    if (shared) {
+      expect(within(row).getByText('From profile: team')).toBeTruthy()
+    }
+
+    fireEvent.click(within(row).getByRole('button', { name: label }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText(title)).toBeTruthy()
+    expect(deleteOAuthAccount).not.toHaveBeenCalled()
+    fireEvent.click(within(dialog).getByRole('button', { name: label }))
+    await waitFor(() =>
+      expect(deleteOAuthAccount).toHaveBeenCalledWith('openai-codex', 'stable-first', {
+        connectionId: 'connection-a',
+        profile: 'beta'
+      })
+    )
+    expect(disconnectOAuthProvider).not.toHaveBeenCalled()
+    expect(listOAuthProviders).toHaveBeenCalledTimes(2)
+  })
+
+  it('attaches an existing account from another profile without starting OAuth', async () => {
+    // Radix Select scrolls the focused option; jsdom has no layout API.
+    Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: vi.fn() })
+    listOAuthProviders.mockResolvedValue({
+      providers: [
+        managedProvider({
+          status: { logged_in: false },
+          accounts: [],
+          available_accounts: [{ id: 'shared-id', label: 'Work', owner_profile: 'team', priority: 0, enabled: true }]
+        })
+      ]
+    })
+    await renderProvidersSettings()
+    fireEvent.click(screen.getByRole('button', { name: 'Other providers' }))
+    fireEvent.click(screen.getByRole('combobox', { name: 'Existing account' }))
+    fireEvent.click(await screen.findByRole('option', { name: 'Work · team' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Link account' }))
+    await waitFor(() =>
+      expect(linkOAuthAccount).toHaveBeenCalledWith('openai-codex', 'team', 'shared-id', {
+        connectionId: 'connection-a',
+        profile: 'beta'
+      })
+    )
+    expect(startManualProviderOAuth).not.toHaveBeenCalled()
+    expect(listOAuthProviders).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps failed writes visible and leaves the server account state intact', async () => {
+    listOAuthProviders.mockResolvedValue({ providers: [managedProvider()] })
+    updateOAuthAccount.mockRejectedValueOnce(new Error('Account is busy'))
+    await renderProvidersSettings()
+    const row = screen.getByRole('listitem', { name: 'Work' })
+    fireEvent.click(within(row).getByRole('switch'))
+    expect((await within(row).findByRole('alert')).textContent).toContain('Account is busy')
+    expect(within(row).getByRole('switch').getAttribute('aria-checked')).toBe('true')
+    expect((within(row).getByRole('switch') as HTMLButtonElement).disabled).toBe(false)
+    expect(listOAuthProviders).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes both writes when two account rows are changed before the first reload completes', async () => {
+    let completeSecondWrite!: (result: { ok: boolean }) => void
+    updateOAuthAccount.mockResolvedValueOnce({ ok: true }).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          completeSecondWrite = resolve
+        })
+    )
+    listOAuthProviders
+      .mockResolvedValueOnce({ providers: [managedProvider()] })
+      .mockResolvedValueOnce({
+        providers: [
+          managedProvider({
+            accounts: [
+              { id: 'stable-first', label: 'Work', priority: 0, enabled: false },
+              { id: 'stable-second', label: 'Personal', priority: 1, enabled: false }
+            ]
+          })
+        ]
+      })
+      .mockResolvedValueOnce({
+        providers: [
+          managedProvider({
+            accounts: [
+              { id: 'stable-first', label: 'Work', priority: 0, enabled: false },
+              { id: 'stable-second', label: 'Personal', priority: 1, enabled: true }
+            ]
+          })
+        ]
+      })
+    await renderProvidersSettings()
+    fireEvent.click(within(screen.getByRole('listitem', { name: 'Work' })).getByRole('switch'))
+    fireEvent.click(within(screen.getByRole('listitem', { name: 'Personal' })).getByRole('switch'))
+    await waitFor(() => expect(listOAuthProviders).toHaveBeenCalledTimes(2))
+    await act(async () => completeSecondWrite({ ok: true }))
+    expect(
+      within(screen.getByRole('listitem', { name: 'Personal' }))
+        .getByRole('switch')
+        .getAttribute('aria-checked')
+    ).toBe('true')
+  })
+
+  it('shows a disabled or missing source separately from the profile assignment toggle', async () => {
+    listOAuthProviders.mockResolvedValue({
+      providers: [
+        managedProvider({
+          accounts: [
+            {
+              id: 'link-disabled',
+              label: 'Shared',
+              priority: 0,
+              enabled: false,
+              configured_enabled: true,
+              owner_enabled: false,
+              owner_profile: 'team',
+              owner_credential_id: 'canonical',
+              shared: true
+            },
+            {
+              id: 'link-missing',
+              label: 'Missing',
+              priority: 1,
+              enabled: false,
+              configured_enabled: true,
+              owner_profile: 'former',
+              shared: true,
+              missing: true,
+              unavailable_reason: 'owner_missing'
+            }
+          ]
+        })
+      ]
+    })
+    await renderProvidersSettings()
+    const disabled = within(screen.getByRole('listitem', { name: 'Shared' }))
+    expect(disabled.getByText('Disabled')).toBeTruthy()
+    expect(disabled.getByText('The source account is disabled in its owner profile.')).toBeTruthy()
+    expect(disabled.getByRole('switch').getAttribute('aria-checked')).toBe('true')
+    const missing = within(screen.getByRole('listitem', { name: 'Missing' }))
+    expect(missing.getByText('Unavailable')).toBeTruthy()
+    expect(missing.getByText('The source account is no longer available.')).toBeTruthy()
+    expect(missing.getByRole('button', { name: 'Unlink from profile' })).toBeTruthy()
+  })
+
+  it('does not offer accounts whose canonical owner identity is already linked', async () => {
+    Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: vi.fn() })
+    listOAuthProviders.mockResolvedValue({
+      providers: [
+        managedProvider({
+          accounts: [
+            {
+              id: 'local-link',
+              label: 'Shared',
+              priority: 0,
+              enabled: true,
+              owner_profile: 'team',
+              owner_credential_id: 'canonical',
+              shared: true
+            }
+          ],
+          available_accounts: [
+            { id: 'canonical', label: 'Already linked', priority: 0, enabled: true, owner_profile: 'team' },
+            { id: 'canonical', label: 'Other owner', priority: 0, enabled: true, owner_profile: 'other' }
+          ]
+        })
+      ]
+    })
+    await renderProvidersSettings()
+    fireEvent.click(screen.getByRole('combobox', { name: 'Existing account' }))
+    expect(await screen.findByRole('option', { name: 'Other owner · other' })).toBeTruthy()
+    expect(screen.queryByRole('option', { name: 'Already linked · team' })).toBeNull()
+  })
+
+  it('does not repaint an old profile when its account refresh finishes after a scope switch', async () => {
+    $settingsScopeOverride.set('beta')
+    let completeRefresh!: (response: { providers: OAuthProvider[] }) => void
+    const gamma = managedProvider({ accounts: [{ id: 'gamma-account', label: 'Gamma', priority: 0, enabled: true }] })
+    bindConfigReadOrigin(gamma, { connectionId: 'connection-a', profile: 'gamma' })
+    listOAuthProviders
+      .mockResolvedValueOnce({ providers: [managedProvider()] })
+      .mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            completeRefresh = resolve
+          })
+      )
+      .mockResolvedValueOnce({ providers: [gamma] })
+
+    try {
+      await renderProvidersSettings()
+      fireEvent.click(within(screen.getByRole('listitem', { name: 'Work' })).getByRole('switch'))
+      await waitFor(() => expect(listOAuthProviders).toHaveBeenCalledTimes(2))
+      await act(async () => $settingsScopeOverride.set('gamma'))
+      expect(await screen.findByText('Gamma')).toBeTruthy()
+      await act(async () => completeRefresh({ providers: [managedProvider()] }))
+      expect(screen.getByText('Gamma')).toBeTruthy()
+      expect(screen.queryByRole('listitem', { name: 'Work' })).toBeNull()
+    } finally {
+      await act(async () => $settingsScopeOverride.set(null))
+    }
+  })
+
+  it('keeps an additive OAuth sign-in on the connection that served the account list', async () => {
+    listOAuthProviders.mockResolvedValue({ providers: [managedProvider()] })
+    await renderProvidersSettings()
+    fireEvent.click(screen.getByRole('button', { name: 'Add account' }))
+    expect(startManualProviderOAuth).toHaveBeenCalledWith(
+      'openai-codex',
+      { connectionId: 'connection-a', profile: 'beta' },
+      true
+    )
+  })
+
+  it('shows separate Codex accounts and starts an additive login in the settings profile', async () => {
+    $settingsScopeOverride.set('beta')
+    listOAuthProviders.mockResolvedValue({
+      providers: [
+        provider('openai-codex', true, {
+          name: 'OpenAI Codex',
+          supports_add_account: true,
+          accounts: [
+            { id: 'first', label: 'first@example.com', priority: 0 },
+            { id: 'second', label: 'second@example.com', priority: 1 }
+          ]
+        })
+      ]
+    })
+
+    try {
+      await renderProvidersSettings()
+      expect(await screen.findByText('first@example.com')).toBeTruthy()
+      expect(screen.getByText('second@example.com')).toBeTruthy()
+      fireEvent.click(screen.getByRole('button', { name: 'Add account' }))
+      expect(startManualProviderOAuth).toHaveBeenCalledWith('openai-codex', 'beta', true)
+      expect(disconnectOAuthProvider).not.toHaveBeenCalled()
+    } finally {
+      $settingsScopeOverride.set(null)
+    }
+  })
+
+  it('keeps Accounts visible when the provider request fails', async () => {
+    listOAuthProviders.mockRejectedValue(new Error('Provider service unavailable'))
+    getEnvVars.mockResolvedValue({ WIDGET_API_KEY: keyVar({ provider: 'widget', provider_label: 'Widget' }) })
+    await renderProvidersSettings()
+    expect((await screen.findByRole('alert')).textContent).toContain('Provider service unavailable')
+    expect(screen.queryByText('Widget')).toBeNull()
+    listOAuthProviders.mockResolvedValue({ providers: [provider('nous', true)] })
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Nous Portal')).toBeTruthy()
+  })
+
   it('reads and saves API keys for the shared Settings target and reloads when it changes', async () => {
     $activeGatewayProfile.set('profile-a')
     $settingsScopeOverride.set('profile-b')
@@ -462,5 +835,63 @@ describe('ProvidersSettings', () => {
     fireEvent.click(row)
 
     await waitFor(() => expect(startManualLocalEndpoint).toHaveBeenCalledWith(null))
+  })
+})
+
+describe('OAuth account API routing', () => {
+  it('pins every account request to the connection and profile that served its list', async () => {
+    const api = vi.fn(async (request: { method?: string }) =>
+      request.method ? { ok: true } : { providers: [provider('openai-codex', true)] }
+    )
+
+    const previous = window.hermesDesktop
+    const real = await import('@/api/config')
+    const client = await import('@/api/client')
+    Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: { api } })
+
+    try {
+      client.setApiRequestConnection('connection-a')
+      const response = await real.listOAuthProviders('beta')
+      const origin = real.peekConfigReadOrigin(response.providers[0])
+      client.setApiRequestConnection('connection-b')
+      await real.updateOAuthAccount('openai-codex', 'stable/first', { enabled: false }, origin)
+      await real.deleteOAuthAccount('openai-codex', 'stable/second', origin)
+      await real.linkOAuthAccount('openai-codex', 'team', 'stable/third', origin)
+      await real.listOAuthProviders(origin)
+      client.setApiRequestConnection('connection-a')
+
+      expect(api.mock.calls.map(([request]) => request)).toEqual([
+        expect.objectContaining({ connectionId: 'connection-a', profile: 'beta', path: '/api/providers/oauth' }),
+        expect.objectContaining({
+          connectionId: 'connection-a',
+          profile: 'beta',
+          method: 'PATCH',
+          path: '/api/providers/oauth/openai-codex/accounts/stable%2Ffirst',
+          body: { enabled: false }
+        }),
+        expect.objectContaining({
+          connectionId: 'connection-a',
+          profile: 'beta',
+          method: 'DELETE',
+          path: '/api/providers/oauth/openai-codex/accounts/stable%2Fsecond'
+        }),
+        expect.objectContaining({
+          connectionId: 'connection-a',
+          profile: 'beta',
+          method: 'POST',
+          path: '/api/providers/oauth/openai-codex/accounts/link',
+          body: { owner_profile: 'team', account_id: 'stable/third' }
+        }),
+        expect.objectContaining({ connectionId: 'connection-a', profile: 'beta', path: '/api/providers/oauth' })
+      ])
+    } finally {
+      client.setApiRequestConnection(null)
+
+      if (previous) {
+        Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: previous })
+      } else {
+        Reflect.deleteProperty(window, 'hermesDesktop')
+      }
+    }
   })
 })

@@ -1,3 +1,4 @@
+import { deProviders } from './de_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { deModelMenu } from './de_model_menu'
@@ -2584,37 +2585,7 @@ export const deOverrides = {
         }
       }
     },
-    providers: {
-      connectAccount: 'Ein Konto verbinden',
-      haveApiKey: 'Haben Sie stattdessen einen API-Key?',
-      intro:
-        'Melden Sie sich mit einem Abo an – kein API-Key zum Kopieren. Hermes übernimmt die Browser-Anmeldung für Sie, direkt hier in der App.',
-      connected: 'Verbunden',
-      collapse: 'Einklappen',
-      connectAnother: 'Weiteren Provider verbinden',
-      otherProviders: 'Weitere Provider',
-      disconnect: 'Trennen',
-      disconnectInTerminal: 'Trennen (führt den Entfernungsbefehl im Terminal aus)',
-      removeConfirm: provider => `${provider} entfernen?`,
-      removeExternalGeneric: provider => `${provider} wird von einer eigenen CLI verwaltet – entfernen Sie ihn dort.`,
-      removeKeyManaged: provider =>
-        `${provider} ist über einen API-Key konfiguriert. Entfernen Sie ihn unter API-Keys.`,
-      removeTerminalConfirm: (provider, command) =>
-        `${provider} trennen? Dadurch wird "${command}" im Terminal ausgeführt, um die Zugangsdaten zu löschen.`,
-      removeTerminalRunning: provider => `${provider}-Trennung wird im Terminal ausgeführt…`,
-      removedTitle: 'Konto entfernt',
-      removedMessage: provider => `${provider} wurde entfernt.`,
-      failedRemove: provider => `${provider} konnte nicht entfernt werden`,
-      noProviderKeys: 'Keine Provider-API-Keys verfügbar.',
-      searchKeys: 'Provider suchen…',
-      noKeysMatch: 'Keine Provider entsprechen Ihrer Suche.',
-      localEndpoint: {
-        title: 'Lokaler / eigener Endpoint',
-        description:
-          'Verbinden Sie Hermes mit einem beliebigen OpenAI-kompatiblen Endpunkt (Zyphra, vLLM, llama.cpp, Ollama usw.).'
-      },
-      loading: 'Provider werden geladen…'
-    },
+    providers: deProviders,
     sessions: {
       loading: 'Archivierte Sessions werden geladen…',
       archivedTitle: 'Archivierte Sessions',

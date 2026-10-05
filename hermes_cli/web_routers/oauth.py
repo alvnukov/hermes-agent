@@ -21,8 +21,8 @@ from hermes_cli.web_deps import LateState, late
 from hermes_cli.web_server_oauth import (
     _external_process_cli_command, _oauth_profile_name, _oauth_sessions, _oauth_sessions_lock, _truncate_token,
 )
-from hermes_cli.web_models import OAuthSubmitBody
-from hermes_cli.web_routers._common import scoped_to_thread
+from hermes_cli.web_models import OAuthAccountLinkBody, OAuthAccountUpdateBody, OAuthSubmitBody
+from hermes_cli.web_routers._common import config_scoped_to_thread, destructive_profile, scoped_to_thread
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
@@ -327,7 +327,20 @@ def _codex_full_login_worker(session_id: str) -> None:
         with _profile_scope(session_profile), _oauth_sessions_lock:
             if _codex_cancelled(sess, session_id, " before token save"):
                 return
-            _save_codex_tokens(tokens)
+            if sess.get("add_account"):
+                from agent.credential_accounts import account_pool
+                from hermes_cli.auth import DEFAULT_CODEX_BASE_URL
+                from hermes_cli.auth_commands import store_oauth_credential
+
+                store_oauth_credential("openai-codex", {
+                    "tokens": tokens, "base_url": DEFAULT_CODEX_BASE_URL,
+                    "last_refresh": datetime.now(timezone.utc).isoformat(),
+                }, pool=account_pool("openai-codex"))
+            else:
+                from agent.credential_accounts import finalize_account_login
+
+                _save_codex_tokens(tokens)
+                finalize_account_login("openai-codex")
             sess["status"] = "approved"
         _log.info("oauth/device: openai-codex login completed (session=%s)", session_id)
     except Exception as e:
@@ -499,11 +512,12 @@ async def _start_nous_device_code(profile: Optional[str]) -> Dict[str, Any]:
     }
 
 
-async def _start_codex_device_code(profile: Optional[str]) -> Dict[str, Any]:
+async def _start_codex_device_code(profile: Optional[str], *, add_account: bool = False) -> Dict[str, Any]:
     # The full Codex helper polls inline, so it runs in a worker thread and
     # proxies user_code + verification_url back via the session dict; block
     # briefly until the worker has populated the user_code, OR errored.
-    sid, _ = _new_oauth_session("openai-codex", "device_code", profile=profile)
+    sid, sess = _new_oauth_session("openai-codex", "device_code", profile=profile)
+    sess["add_account"] = add_account
     _start_poller(_codex_full_login_worker, sid, prefix="oauth-codex")
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -682,9 +696,64 @@ async def list_oauth_providers(profile: Optional[str] = None):
                 "disconnect_command": _oauth_provider_disconnect_command(p),
                 "disconnectable": disconnect_hint is None, "status": status,
             })
+            if p["id"] == "openai-codex":
+                from agent.credential_accounts import account_metadata, list_available_accounts
+                from agent.credential_pool import load_pool
+
+                pool = load_pool(p["id"])
+                providers[-1]["supports_add_account"] = True
+                providers[-1]["supports_account_management"] = True
+                providers[-1]["accounts"] = [
+                    account_metadata(pool, entry) for entry in pool.entries()
+                ]
+                providers[-1]["available_accounts"] = list_available_accounts(p["id"])
         return {"providers": providers}
 
     return await scoped_to_thread(profile, _run)
+
+
+async def _account_action(provider_id: str, request: Request, profile: Optional[str], action: Callable):
+    """Account writes carry the same authenticated, explicit scope as OAuth login."""
+    _require_token(request)
+    if provider_id != "openai-codex":
+        raise HTTPException(400, "Account management is only available for OpenAI Codex.")
+    profile = destructive_profile(profile, "OAuth account management")
+
+    def _run():
+        try:
+            action()
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True}
+
+    return await config_scoped_to_thread(profile, _run)
+
+
+@router.post("/api/providers/oauth/{provider_id}/accounts/link")
+async def link_oauth_account(provider_id: str, body: OAuthAccountLinkBody, request: Request,
+                             profile: Optional[str] = None):
+    from agent.credential_accounts import link_account
+
+    return await _account_action(provider_id, request, profile,
+                                 lambda: link_account(provider_id, body.owner_profile, body.account_id))
+
+
+@router.patch("/api/providers/oauth/{provider_id}/accounts/{credential_id}")
+async def update_oauth_account(provider_id: str, credential_id: str, body: OAuthAccountUpdateBody,
+                               request: Request, profile: Optional[str] = None):
+    from agent.credential_accounts import update_account
+
+    return await _account_action(provider_id, request, profile,
+                                 lambda: update_account(provider_id, credential_id, **body.model_dump()))
+
+
+@router.delete("/api/providers/oauth/{provider_id}/accounts/{credential_id}")
+async def remove_oauth_account(provider_id: str, credential_id: str, request: Request,
+                               profile: Optional[str] = None):
+    from agent.credential_accounts import remove_account
+
+    return await _account_action(provider_id, request, profile,
+                                 lambda: remove_account(provider_id, credential_id))
 
 
 def _reject_if_not_disconnectable(provider: Dict[str, Any], status: Dict[str, Any]) -> None:
@@ -790,7 +859,9 @@ def _validate_oauth_profile(profile: Optional[str]) -> str:
 
 
 @router.post("/api/providers/oauth/{provider_id}/start")
-async def start_oauth_login(provider_id: str, request: Request, profile: Optional[str] = None):
+async def start_oauth_login(
+    provider_id: str, request: Request, profile: Optional[str] = None, add_account: bool = False,
+):
     """Initiate an OAuth login flow. Token-protected."""
     _require_token(request)
     _gc_oauth_sessions()
@@ -802,9 +873,12 @@ async def start_oauth_login(provider_id: str, request: Request, profile: Optiona
         raise HTTPException(400, f"{provider_id} uses an external CLI; run `{catalog_entry['cli_command']}` manually")
     if catalog_entry["flow"] != "device_code":
         raise HTTPException(status_code=400, detail="Unsupported flow")
+    if add_account and provider_id != "openai-codex":
+        raise HTTPException(status_code=400, detail="Adding accounts is not supported for this provider")
     flow = await _begin_oauth_setup_metric(provider_id, profile)
     try:
-        body = await _start_device_code_flow(provider_id, profile=profile)
+        body = (await _start_codex_device_code(profile, add_account=True) if add_account
+                else await _start_device_code_flow(provider_id, profile=profile))
     except Exception as e:
         await _end_oauth_setup_metric(flow, e)
         if isinstance(e, HTTPException):

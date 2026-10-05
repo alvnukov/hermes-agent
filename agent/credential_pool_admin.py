@@ -59,7 +59,7 @@ class CredentialPoolAdminMixin:
                 return None
             removed = self._entries.pop(index - 1)
             self._entries = [replace(e, priority=p) for p, e in enumerate(self._entries)]
-            self._persist(removed_ids=[removed.id])
+            self._persist(removed_ids=[removed.id], control_updated_ids=[e.id for e in self._entries])
             if self._current_id == removed.id:
                 self._current_id = None
             return removed
@@ -78,7 +78,7 @@ class CredentialPoolAdminMixin:
             # Apply load-time ordering now so the reported position survives reload.
             _normalize_pool_priorities(self.provider, entries)
             self._entries = sorted(entries, key=lambda e: e.priority)
-            self._persist()
+            self._persist(control_updated_ids=[e.id for e in self._entries])
             return self._find(lambda e: e.id == credential_id)
 
     def resolve_target(self, target: Any) -> Tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
@@ -108,20 +108,22 @@ class CredentialPoolAdminMixin:
             return None, None, f'No credential matching "{raw}".'
 
     def add_entry(self, entry: PooledCredential) -> PooledCredential:
-        from agent.credential_pool import _next_priority, write_credential_pool
+        from agent.credential_pool import _next_priority, _profile_owns_pool_provider, write_credential_pool
         from hermes_cli import auth as auth_mod
 
         with self._lock:
             entry = replace(entry, priority=_next_priority(self._entries))
             self._entries.append(entry)
             borrowed_ids = getattr(self, "_borrowed_root_ids", None)
-            if borrowed_ids:
+            if borrowed_ids or not _profile_owns_pool_provider(self.provider):
                 # ``hermes -p <profile> auth add <single-use provider>``: the
                 # profile claims its OWN credential. Persist only profile-owned
                 # rows — copying the borrowed root grant alongside would fork
                 # its single-use refresh token (#100339). Once the profile owns
                 # rows, the root fallback for this provider is shadowed.
-                self._entries = [e for e in self._entries if e.id not in borrowed_ids]
+                # A first explicit add also claims ownership when there are no
+                # borrowed rows; the ordinary persist path is update-only at root.
+                self._entries = [e for e in self._entries if e.id not in (borrowed_ids or set())]
                 written = write_credential_pool(
                     self.provider, [e.to_dict() for e in self._entries],
                     token_bases=self._persisted_token_pairs,
@@ -129,5 +131,5 @@ class CredentialPoolAdminMixin:
                 self._persisted_token_pairs = auth_mod._token_pairs_by_id(written)
                 self._borrowed_root_ids = set()
             else:
-                self._persist()
+                self._persist(control_updated_ids=[entry.id])
             return entry

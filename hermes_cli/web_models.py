@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, SecretStr, StrictBool, field_validator
+from pydantic import BaseModel, Field, SecretStr, StrictBool, field_validator
 
 
 class ConfigUpdate(BaseModel):
@@ -256,6 +256,15 @@ class STTLeaseRequest(BaseModel):
 class OAuthSubmitBody(BaseModel):
     session_id: str
     code: str
+
+class OAuthAccountLinkBody(BaseModel):
+    owner_profile: str = Field(min_length=1, max_length=128)
+    account_id: str = Field(min_length=1, max_length=128)
+
+class OAuthAccountUpdateBody(BaseModel):
+    label: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    enabled: Optional[StrictBool] = None
+    priority: Optional[int] = Field(default=None, ge=0, le=10000)
 
 class BulkDeleteSessions(BaseModel):
     ids: List[str]
@@ -540,4 +549,3 @@ class _PluginProvidersPutBody(BaseModel):
 
 class _PluginVisibilityBody(BaseModel):
     hidden: bool
-

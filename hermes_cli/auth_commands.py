@@ -422,8 +422,21 @@ def _add_credential(args, provider: str, pool, requested_type: str) -> PooledCre
         raise SystemExit(f"`hermes auth add {provider}` is not implemented for auth type {requested_type} yet.")
 
     creds = spec.login(args)
+    existing = pool.entries()
+    entry = store_oauth_credential(provider, creds, pool=pool, label=getattr(args, "label", None))
+    print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
+    if provider == "openai-codex":
+        _warn_same_codex_account(entry.access_token, existing)
+    return entry
+
+
+def store_oauth_credential(provider: str, creds: dict, *, pool=None, label: str | None = None) -> PooledCredential:
+    """Persist an OAuth result identically for CLI and Desktop account additions."""
+    spec = _OAUTH_ADD_SPECS[provider]
+    if pool is None:
+        pool = load_pool(provider)
     token = spec.token(creds)
-    label = (getattr(args, "label", None) or "").strip() or label_from_token(
+    label = (label or "").strip() or label_from_token(
         token, f"{provider}-oauth-{len(pool.entries()) + 1}")
     # Every account gets a distinct, self-contained pool entry instead of routing through a
     # singleton save path (which collapsed every added account into the latest login).
@@ -438,9 +451,6 @@ def _add_credential(args, provider: str, pool, requested_type: str) -> PooledCre
     # did implicitly); subsequent adds leave the active provider as-is.
     if spec.activate_first and not existing:
         auth_mod.mark_provider_active_if_unset(provider)
-    print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
-    if provider == "openai-codex":
-        _warn_same_codex_account(token, existing)
     return entry
 
 
