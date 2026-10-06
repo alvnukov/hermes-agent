@@ -3,7 +3,7 @@ name: Isolated Kanban budget verification
 on:
   push:
     branches: [codex/kanban-budget-isolation-check]
-    paths: [.github/workflows/kanban-budget-isolation-check.yml, kanban-budget.patch]
+    paths: [.github/workflows/kanban-budget-isolation-check.yml]
 
 permissions:
   contents: read
@@ -12,6 +12,9 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     env:
       HERMES_TEST_FILE_RETRIES: '0'
       HERMES_TEST_WORKERS: '2'
@@ -19,6 +22,7 @@ jobs:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
+          fetch-depth: 30
       - name: Isolate runtime state
         run: |
           echo "HERMES_HOME=$RUNNER_TEMP/kanban-verification-home" >> "$GITHUB_ENV"
@@ -27,23 +31,35 @@ jobs:
         with:
           extras: '[]'
           test-environment: 'true'
-      - name: Baseline focused tests
-        run: scripts/run_tests.sh tests/hermes_cli/test_kanban_worker_terminal_scope.py tests/hermes_cli/test_resolve_turn_limit.py tests/gateway/test_runtime_env_reload_config_authority.py
-      - name: Export isolated test runtime for local verification
-        if: always() && env.HERMES_PYTHON != ''
-        shell: bash
+      - name: Require the regression to fail before the source fix
         run: |
-          set -euo pipefail
-          "$HERMES_PYTHON" -c 'import sys,json; print(json.dumps({"prefix":sys.prefix,"base_prefix":sys.base_prefix,"executable":sys.executable}))' > "$RUNNER_TEMP/test-runtime.json"
-          PREFIX=$("$HERMES_PYTHON" -c 'import sys; print(sys.prefix)')
-          BASE=$("$HERMES_PYTHON" -c 'import sys; print(sys.base_prefix)')
-          tar -czf "$RUNNER_TEMP/test-runtime.tar.gz" "$PREFIX" "$BASE"
+          set +e
+          scripts/run_tests.sh tests/hermes_cli/test_kanban_worker_iteration_budget.py -k config_only_bridge_null -x --tb=short 2>&1 | tee "$RUNNER_TEMP/red.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          test "$status" -ne 0
+          grep -F 'assert actual == expected' "$RUNNER_TEMP/red.log"
+      - name: Apply the narrowly checked source fix
+        run: |
+          "$HERMES_PYTHON" kanban_budget_apply.py
+          git diff --check
+          "$HERMES_PYTHON" -m py_compile gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py hermes_cli/iteration_env.py
+      - name: Green regression and focused compatibility tests
+        run: |
+          scripts/run_tests.sh --file-timeout 600 tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/hermes_cli/test_kanban_worker_terminal_scope.py tests/hermes_cli/test_kanban_worker_spawn_toolsets.py tests/hermes_cli/test_resolve_turn_limit.py tests/hermes_cli/test_managed_scope_env.py tests/gateway/test_config_env_bridge_authority.py tests/gateway/test_runtime_env_reload_config_authority.py tests/gateway/test_startup_agent_budget_log.py tests/agent/test_iteration_budget_race.py tests/agent/test_run_budget.py tests/agent/test_turn_finalizer_iteration_limit_exit.py --tb=short 2>&1 | tee "$RUNNER_TEMP/green.log"
+      - name: Export minimal implementation diff
+        if: always()
+        run: |
+          git diff 069a4d4e79d7c77589d0c2920eea8db8c2fa2fcb -- gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py hermes_cli/iteration_env.py tests/hermes_cli/test_kanban_worker_iteration_budget.py > "$RUNNER_TEMP/kanban-iteration-isolation.patch"
+          git status --short
+          "$HERMES_PYTHON" --version
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: isolated-kanban-test-runtime
+          name: kanban-budget-verification
           path: |
-            ${{ runner.temp }}/test-runtime.tar.gz
-            ${{ runner.temp }}/test-runtime.json
-          retention-days: 1
+            ${{ runner.temp }}/red.log
+            ${{ runner.temp }}/green.log
+            ${{ runner.temp }}/kanban-iteration-isolation.patch
+          retention-days: 7
           if-no-files-found: warn
