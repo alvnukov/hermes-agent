@@ -30,6 +30,8 @@ jobs:
         run: |
           "$HERMES_PYTHON" kanban_budget_apply.py
           git diff --check
+      - name: Verify native platform test collection first
+        run: scripts/run_tests.sh tests/tools/test_iteration_env_profile_boundary.py --tb=short
       - name: Verify native Windows budgets and case-insensitive profile routing
         run: |
           scripts/run_tests.sh --file-timeout 900 tests/tools/test_iteration_env_profile_boundary.py tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/hermes_cli/test_kanban_budget_stop_reasons.py --tb=short 2>&1 | tee "$RUNNER_TEMP/windows-budget.log"
