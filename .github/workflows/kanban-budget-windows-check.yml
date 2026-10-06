@@ -1,0 +1,42 @@
+name: Native Windows Kanban budget verification
+
+on:
+  push:
+    branches: [codex/kanban-budget-isolation-check]
+    paths: [.github/workflows/kanban-budget-windows-check.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  windows-budget:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    env:
+      HERMES_TEST_FILE_RETRIES: '0'
+      HERMES_TEST_WORKERS: '2'
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+      - name: Apply the checked source patch in an isolated checkout
+        run: |
+          "$HERMES_PYTHON" kanban_budget_apply.py
+          git diff --check
+      - name: Verify native Windows budgets and case-insensitive profile routing
+        run: |
+          scripts/run_tests.sh --file-timeout 900 tests/tools/test_iteration_env_profile_boundary.py tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/hermes_cli/test_kanban_budget_stop_reasons.py --tb=short 2>&1 | tee "$RUNNER_TEMP/windows-budget.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: native-windows-kanban-budget-results
+          path: ${{ runner.temp }}/windows-budget.log
+          retention-days: 7
+          if-no-files-found: warn
