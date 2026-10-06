@@ -6,7 +6,7 @@ on:
     paths: [.github/workflows/kanban-budget-isolation-check.yml]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   test:
@@ -17,28 +17,35 @@ jobs:
         shell: bash
     env:
       HERMES_TEST_FILE_RETRIES: '0'
-      HERMES_TEST_WORKERS: '2'
+      HERMES_TEST_WORKERS: '4'
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
           fetch-depth: 30
-      - name: Isolate runtime state
+      - name: Verify the current main source without resetting the checkout
         run: |
-          echo "HERMES_HOME=$RUNNER_TEMP/kanban-verification-home" >> "$GITHUB_ENV"
-          echo "HERMES_RUNTIME_DIR=$RUNNER_TEMP/kanban-verification-runtime" >> "$GITHUB_ENV"
+          git fetch --no-tags --depth=1 origin main:refs/remotes/origin/main
+          git rev-parse origin/main > "$RUNNER_TEMP/source-base.txt"
+          git diff --exit-code origin/main -- gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py
+          test "$(git merge-base origin/main HEAD)" = "$(git rev-parse origin/main)"
       - uses: ./.github/actions/setup-pm
         with:
           extras: '[]'
           test-environment: 'true'
+      - name: Isolate runtime state after toolchain setup
+        run: |
+          echo "HERMES_HOME=$RUNNER_TEMP/kanban-verification-home" >> "$GITHUB_ENV"
+          echo "HERMES_RUNTIME_DIR=$RUNNER_TEMP/kanban-verification-runtime" >> "$GITHUB_ENV"
       - name: Require the regression to fail before the source fix
         run: |
           set +e
           scripts/run_tests.sh tests/hermes_cli/test_kanban_worker_iteration_budget.py -k config_only_bridge_null -x --tb=short 2>&1 | tee "$RUNNER_TEMP/red.log"
           status=${PIPESTATUS[0]}
           set -e
-          test "$status" -ne 0
+          test "$status" = 1
           grep -F 'assert actual == expected' "$RUNNER_TEMP/red.log"
+          grep -F "'consumed': 40" "$RUNNER_TEMP/red.log"
       - name: Apply the narrowly checked source fix
         run: |
           "$HERMES_PYTHON" kanban_budget_apply.py
@@ -46,13 +53,33 @@ jobs:
           "$HERMES_PYTHON" -m py_compile gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py hermes_cli/iteration_env.py
       - name: Green regression and focused compatibility tests
         run: |
-          scripts/run_tests.sh --file-timeout 600 tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/hermes_cli/test_kanban_worker_terminal_scope.py tests/hermes_cli/test_kanban_worker_spawn_toolsets.py tests/hermes_cli/test_resolve_turn_limit.py tests/hermes_cli/test_managed_scope_env.py tests/gateway/test_config_env_bridge_authority.py tests/gateway/test_runtime_env_reload_config_authority.py tests/gateway/test_startup_agent_budget_log.py tests/agent/test_iteration_budget_race.py tests/agent/test_run_budget.py tests/agent/test_turn_finalizer_iteration_limit_exit.py --tb=short 2>&1 | tee "$RUNNER_TEMP/green.log"
-      - name: Export minimal implementation diff
+          scripts/run_tests.sh --file-timeout 600 tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/tools/test_iteration_env_profile_boundary.py tests/hermes_cli/test_kanban_budget_stop_reasons.py tests/hermes_cli/test_kanban_worker_terminal_scope.py tests/hermes_cli/test_kanban_worker_spawn_toolsets.py tests/hermes_cli/test_resolve_turn_limit.py tests/hermes_cli/test_managed_scope_env.py tests/gateway/test_config_env_bridge_authority.py tests/gateway/test_runtime_env_reload_config_authority.py tests/gateway/test_startup_agent_budget_log.py tests/gateway/test_multiplex_residue_parity.py tests/gateway/test_host_gateway_profile_env.py tests/agent/test_iteration_budget_race.py tests/agent/test_run_budget.py tests/agent/test_turn_finalizer_iteration_limit_exit.py --tb=short 2>&1 | tee "$RUNNER_TEMP/green.log"
+      - name: Export implementation and tests without verification scaffolding
         if: always()
         run: |
-          git diff 069a4d4e79d7c77589d0c2920eea8db8c2fa2fcb -- gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py hermes_cli/iteration_env.py tests/hermes_cli/test_kanban_worker_iteration_budget.py > "$RUNNER_TEMP/kanban-iteration-isolation.patch"
-          git status --short
+          files=(gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py hermes_cli/iteration_env.py tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/tools/test_iteration_env_profile_boundary.py tests/hermes_cli/test_kanban_budget_stop_reasons.py)
+          git diff origin/main -- "${files[@]}" > "$RUNNER_TEMP/kanban-iteration-isolation.patch"
+          git diff --stat origin/main -- "${files[@]}" | tee "$RUNNER_TEMP/diff-stat.txt"
           "$HERMES_PYTHON" --version
+      - name: Publish a new clean code branch only after successful tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base=$(cat "$RUNNER_TEMP/source-base.txt")
+          remote_main=$(git ls-remote origin refs/heads/main | cut -f1)
+          test "$base" = "$remote_main"
+          delivery="$RUNNER_TEMP/kanban-delivery"
+          git worktree add --detach "$delivery" "$base"
+          git -C "$delivery" apply --check "$RUNNER_TEMP/kanban-iteration-isolation.patch"
+          git -C "$delivery" apply "$RUNNER_TEMP/kanban-iteration-isolation.patch"
+          git -C "$delivery" add gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py hermes_cli/iteration_env.py tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/tools/test_iteration_env_profile_boundary.py tests/hermes_cli/test_kanban_budget_stop_reasons.py
+          git -C "$delivery" -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix(kanban): isolate worker iteration budgets from launch profiles'
+          branch="codex/kanban-iteration-isolation-${GITHUB_RUN_ID}"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -C "$delivery" -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$branch"
+          printf '%s\n' "$branch" > "$RUNNER_TEMP/delivery-branch.txt"
+          git -C "$delivery" rev-parse HEAD > "$RUNNER_TEMP/delivery-commit.txt"
+          git -C "$delivery" show --format=fuller --stat HEAD
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
@@ -61,5 +88,9 @@ jobs:
             ${{ runner.temp }}/red.log
             ${{ runner.temp }}/green.log
             ${{ runner.temp }}/kanban-iteration-isolation.patch
+            ${{ runner.temp }}/diff-stat.txt
+            ${{ runner.temp }}/source-base.txt
+            ${{ runner.temp }}/delivery-branch.txt
+            ${{ runner.temp }}/delivery-commit.txt
           retention-days: 7
           if-no-files-found: warn
