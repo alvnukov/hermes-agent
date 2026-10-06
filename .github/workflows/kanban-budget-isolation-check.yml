@@ -13,14 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      HERMES_HOME: ${{ runner.temp }}/kanban-verification-home
-      HERMES_RUNTIME_DIR: ${{ runner.temp }}/kanban-verification-runtime
       HERMES_TEST_FILE_RETRIES: '0'
       HERMES_TEST_WORKERS: '2'
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
+      - name: Isolate runtime state
+        run: |
+          echo "HERMES_HOME=$RUNNER_TEMP/kanban-verification-home" >> "$GITHUB_ENV"
+          echo "HERMES_RUNTIME_DIR=$RUNNER_TEMP/kanban-verification-runtime" >> "$GITHUB_ENV"
       - uses: ./.github/actions/setup-pm
         with:
           extras: '[]'
