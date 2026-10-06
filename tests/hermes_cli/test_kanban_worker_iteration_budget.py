@@ -32,19 +32,23 @@ with patch.object(socket.socket, "connect", no_network), patch.object(socket, "g
     from run_agent import AIAgent
     shell = cli.HermesCLI.__new__(cli.HermesCLI)
     shell._init_turn_limits(json.loads(sys.argv[2]), None)
+    # The known provider route uses bundled model metadata instead of probing a
+    # custom/local endpoint. No provider request is made; sockets remain blocked.
     agent = AIAgent(
         model="gpt-5.5", provider="openai", api_key="synthetic-budget-test-key",
-        base_url="http://127.0.0.1:9/v1", max_iterations=shell.max_turns,
+        base_url="https://api.openai.com/v1", max_iterations=shell.max_turns,
         enabled_toolsets=[], quiet_mode=True, skip_context_files=True,
         skip_memory=True, save_trajectories=False, skip_background_review=True,
     )
     allowed = [agent.iteration_budget.consume() for _ in range(161)]
-    assert not network_attempts, "probe attempted network I/O"
+    assert agent._session_init_model_config["max_iterations"] == shell.max_turns
     result = {
         "max_turns": shell.max_turns, "max_iterations": agent.max_iterations,
         "budget_max": agent.iteration_budget.max_total,
         "consumed": sum(allowed), "last_allowed": allowed[-1],
     }
+    agent.close()
+    assert not network_attempts, "probe attempted network I/O"
     print("BUDGET_PROBE=" + json.dumps(result))
 '''
 
