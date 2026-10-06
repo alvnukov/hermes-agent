@@ -113,7 +113,7 @@ def test_explicit_child_extra_remains_authoritative(profile_homes):
     assert env[KEY] == "40"
 
 
-@pytest.mark.platforms("linux", "darwin")
+@pytest.mark.platforms("posix")
 def test_profile_aliases_use_resolved_identity(profile_homes, tmp_path):
     a, b, _ = profile_homes
     a_alias, b_alias = tmp_path / "alias-a", tmp_path / "alias-b"
