@@ -1,33 +1,47 @@
-name: Isolated Kanban budget checkout
+name: Isolated Kanban budget verification
 
-# Temporary source-only export; no Hermes runtime or production configuration.
 on:
   push:
     branches: [codex/kanban-budget-isolation-check]
-    paths: [.github/workflows/kanban-budget-isolation-check.yml]
+    paths: [.github/workflows/kanban-budget-isolation-check.yml, kanban-budget.patch]
 
 permissions:
   contents: read
 
 jobs:
-  source:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
+    env:
+      HERMES_HOME: ${{ runner.temp }}/kanban-verification-home
+      HERMES_RUNTIME_DIR: ${{ runner.temp }}/kanban-verification-runtime
+      HERMES_TEST_FILE_RETRIES: '0'
+      HERMES_TEST_WORKERS: '2'
     steps:
       - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
         with:
           persist-credentials: false
-      - name: Export the exact isolated checkout
+      - uses: ./.github/actions/setup-pm
+        with:
+          extras: '[]'
+          test-environment: 'true'
+      - name: Baseline focused tests
+        run: scripts/run_tests.sh tests/hermes_cli/test_kanban_worker_terminal_scope.py tests/hermes_cli/test_resolve_turn_limit.py tests/gateway/test_runtime_env_reload_config_authority.py
+      - name: Export isolated test runtime for local verification
+        if: always() && env.HERMES_PYTHON != ''
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD > "$RUNNER_TEMP/source-commit.txt"
-          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/hermes-source.tar.gz"
+          "$HERMES_PYTHON" -c 'import sys,json; print(json.dumps({"prefix":sys.prefix,"base_prefix":sys.base_prefix,"executable":sys.executable}))' > "$RUNNER_TEMP/test-runtime.json"
+          PREFIX=$("$HERMES_PYTHON" -c 'import sys; print(sys.prefix)')
+          BASE=$("$HERMES_PYTHON" -c 'import sys; print(sys.base_prefix)')
+          tar -czf "$RUNNER_TEMP/test-runtime.tar.gz" "$PREFIX" "$BASE"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
         with:
-          name: isolated-kanban-source
+          name: isolated-kanban-test-runtime
           path: |
-            ${{ runner.temp }}/hermes-source.tar.gz
-            ${{ runner.temp }}/source-commit.txt
+            ${{ runner.temp }}/test-runtime.tar.gz
+            ${{ runner.temp }}/test-runtime.json
           retention-days: 1
-          if-no-files-found: error
+          if-no-files-found: warn
