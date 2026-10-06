@@ -1,0 +1,32 @@
+name: Isolated Kanban budget checkout
+
+on:
+  push:
+    branches: [codex/kanban-budget-isolation-check]
+    paths: [.github/workflows/kanban-budget-isolation-check.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+        with:
+          persist-credentials: false
+      - name: Export the exact isolated checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD > "$RUNNER_TEMP/source-commit.txt"
+          git archive --format=tar HEAD | gzip > "$RUNNER_TEMP/hermes-source.tar.gz"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: isolated-kanban-source
+          path: |
+            ${{ runner.temp }}/hermes-source.tar.gz
+            ${{ runner.temp }}/source-commit.txt
+          retention-days: 1
+          if-no-files-found: error
