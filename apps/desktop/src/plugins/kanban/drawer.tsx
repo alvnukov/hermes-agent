@@ -57,6 +57,7 @@ import {
   useKanbanScope
 } from './api'
 import { ModelOverrideField, overridePatch } from './model-override'
+import { LatestRunChatButton, RunChatButton } from './run-chat'
 import {
   type Diagnostic,
   type DiagnosticAction,
@@ -689,6 +690,7 @@ function FeedTabs({
   detail,
   log,
   onComment,
+  onChatOpen,
   onRequeue,
   running
 }: {
@@ -696,6 +698,7 @@ function FeedTabs({
   detail: KanbanTaskDetail
   log: null | WorkerLog
   onComment: (body: string) => void
+  onChatOpen: () => void
   onRequeue: (body: string) => void
   running: boolean
 }) {
@@ -778,6 +781,7 @@ function FeedTabs({
                       {run.outcome ?? run.status}
                     </Badge>
                     {run.profile && <span className="text-(--ui-text-tertiary)">{run.profile}</span>}
+                    <RunChatButton onOpened={onChatOpen} run={run} taskId={detail.task.id} />
                     {duration(run.started_at, run.ended_at) && (
                       <span className="text-(--ui-text-quaternary)">{duration(run.started_at, run.ended_at)}</span>
                     )}
@@ -1035,6 +1039,7 @@ export function TaskDrawer({
           <DialogTitle className="leading-snug" data-selectable-text="true">
             {task ? task.title || task.id : shortId(id)}
           </DialogTitle>
+          <LatestRunChatButton detail={detail} onOpened={onClose} />
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col" data-selectable-text="true">
@@ -1092,6 +1097,7 @@ export function TaskDrawer({
                     commentPending={commentMut.isPending || requeueMut.isPending}
                     detail={detail}
                     log={log ?? null}
+                    onChatOpen={onClose}
                     onComment={body => commentMut.mutate(body)}
                     onRequeue={body => requeueMut.mutate(body)}
                     running={running}

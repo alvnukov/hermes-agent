@@ -4,6 +4,7 @@ imported lazily inside each method (import cycle)."""
 
 from __future__ import annotations
 
+import os
 import sys
 
 from rich.markup import escape as _escape
@@ -738,6 +739,10 @@ class CLIAgentSetupMixin:
                 except Exception as e:
                     _cprint(f"  {t('cli.resume.title_apply_failed', error=e)}")
                     # Keep _pending_title so it can be retried after row creation succeeds
+            if self._session_db and os.environ.get("HERMES_KANBAN_TASK"):
+                from tools.kanban_tools import register_current_worker_from_env
+                if not register_current_worker_from_env(agent=self.agent):
+                    return False
             return True
         except Exception as e:
             console = ChatConsole()

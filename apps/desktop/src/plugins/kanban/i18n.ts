@@ -29,6 +29,10 @@ type KanbanMessages = {
   noMatch: string
   noTasks: string
   open: string
+  openChat: string
+  chatUnavailable: string
+  chatProfileUnknown: string
+  chatOpenFailed: string
   select: (modifier: string) => string
   deselect: string
   moveTo: (label: string) => string
@@ -254,6 +258,10 @@ export const en: KanbanMessages = {
   noMatch: 'No tasks match the filters',
   noTasks: 'No tasks on this board',
   open: 'Open',
+  openChat: 'Open chat',
+  chatUnavailable: 'This run has no linked chat yet.',
+  chatProfileUnknown: 'This run has no recorded worker profile.',
+  chatOpenFailed: 'Could not open the chat.',
   select: modifier => `Select (${modifier}-click)`,
   deselect: 'Deselect',
   moveTo: label => `Move to ${label}`,
@@ -482,6 +490,10 @@ const ja: KanbanMessages = {
   noMatch: 'フィルタに一致するタスクはありません',
   noTasks: 'このボードにタスクはありません',
   open: '開く',
+  openChat: 'チャットを開く',
+  chatUnavailable: 'この実行にはまだチャットが紐づいていません。',
+  chatProfileUnknown: 'この実行のプロファイルが記録されていません。',
+  chatOpenFailed: 'チャットを開けませんでした。',
   select: modifier => `選択（${modifier}クリック）`,
   deselect: '選択解除',
   moveTo: label => `${label} へ移動`,
@@ -709,6 +721,10 @@ const zh: KanbanMessages = {
   noMatch: '没有符合筛选条件的任务',
   noTasks: '此面板暂无任务',
   open: '打开',
+  openChat: '打开聊天',
+  chatUnavailable: '此运行尚未关联聊天。',
+  chatProfileUnknown: '此运行未记录工作进程配置。',
+  chatOpenFailed: '无法打开聊天。',
   select: modifier => `选择（${modifier}点击）`,
   deselect: '取消选择',
   moveTo: label => `移动到 ${label}`,
@@ -933,6 +949,10 @@ const zhHant: KanbanMessages = {
   noMatch: '沒有符合篩選條件的任務',
   noTasks: '此面板尚無任務',
   open: '開啟',
+  openChat: '開啟聊天',
+  chatUnavailable: '此執行尚未連結聊天。',
+  chatProfileUnknown: '此執行未記錄工作程序設定檔。',
+  chatOpenFailed: '無法開啟聊天。',
   select: modifier => `選取（${modifier}點擊）`,
   deselect: '取消選取',
   moveTo: label => `移至 ${label}`,
