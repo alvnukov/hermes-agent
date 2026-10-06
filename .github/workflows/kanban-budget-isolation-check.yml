@@ -1,5 +1,6 @@
 name: Isolated Kanban budget checkout
 
+# Temporary source-only export; no Hermes runtime or production configuration.
 on:
   push:
     branches: [codex/kanban-budget-isolation-check]
