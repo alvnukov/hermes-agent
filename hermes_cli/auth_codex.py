@@ -16,6 +16,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
@@ -132,7 +133,8 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
 
 def _sync_codex_pool_entries(
     auth_store: Dict[str, Any], tokens: Dict[str, str], last_refresh: Optional[str],
-    previous_singleton_tokens: Optional[Dict[str, str]] = None) -> None:
+    previous_singleton_tokens: Optional[Dict[str, str]] = None,
+    identity_generation: Optional[str] = None) -> None:
     """Mirror a fresh Codex re-auth into the credential_pool OAuth entries.
 
     ``device_code`` (the singleton-seeded entry from ``hermes setup`` / the model picker) is always
@@ -164,6 +166,8 @@ def _sync_codex_pool_entries(
         if not (source == "device_code" or is_alias):
             continue
         entry["access_token"] = access_token
+        if identity_generation:
+            entry["identity_generation"] = identity_generation
         if refresh_token:
             entry["refresh_token"] = refresh_token
         if last_refresh:
@@ -200,6 +204,10 @@ def _save_codex_tokens(
         # tell legacy singleton-aliases (refresh) from independent ``auth add`` accounts (keep).
         previous_singleton_tokens = (
             state.get("tokens") if isinstance(state.get("tokens"), dict) else None)
+        # A token refresh keeps the login grant; fresh login/import replaces it,
+        # including a reauthentication into the same owner and workspace.
+        generation = state.get("identity_generation") if write_through else None
+        state["identity_generation"] = generation or uuid.uuid4().hex
         state.update(tokens=tokens, last_refresh=last_refresh, auth_mode="chatgpt")
         if label and str(label).strip():
             state["label"] = str(label).strip()
@@ -210,7 +218,8 @@ def _save_codex_tokens(
             target_store, target_path, set_active = _load_auth_store(source_path), source_path, False
         _store_provider_state(target_store, "openai-codex", state, set_active=set_active)
         _sync_codex_pool_entries(
-            target_store, tokens, last_refresh, previous_singleton_tokens=previous_singleton_tokens)
+            target_store, tokens, last_refresh, previous_singleton_tokens=previous_singleton_tokens,
+            identity_generation=state["identity_generation"])
         _save_auth_store(target_store, target_path=target_path)
 
 

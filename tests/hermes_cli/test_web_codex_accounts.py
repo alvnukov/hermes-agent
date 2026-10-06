@@ -2,11 +2,47 @@
 import base64
 import json
 import time
+import pytest
 
 from fastapi.testclient import TestClient
 
 from hermes_cli.web_server import _SESSION_TOKEN, app
 from hermes_cli.web_routers import oauth
+
+
+def test_guardian_checkbox_updates_only_the_explicit_profile_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "no-codex"))
+    (tmp_path / "config.yaml").write_text("{}\n")
+    target = tmp_path / "profiles" / "coder"
+    target.mkdir(parents=True)
+    (target / "config.yaml").write_text("{}\n")
+    token = _tokens("test")
+    entry = {"id": "stable-account", "label": "Test", "priority": 0, "auth_type": "oauth",
+             "source": "manual:device_code", "access_token": token["access_token"],
+             "refresh_token": token["refresh_token"], "expires_at": time.time() + 86400}
+    store = {"version": 1, "providers": {}, "credential_pool": {"openai-codex": [entry]}}
+    (tmp_path / "auth.json").write_text(json.dumps(store))
+    (target / "auth.json").write_text(json.dumps(store))
+    client = TestClient(app)
+    headers = {"X-Hermes-Session-Token": _SESSION_TOKEN}
+    path = "/api/providers/oauth/openai-codex/accounts/stable-account?profile=coder"
+    response = client.patch(path, json={"guardian_enabled": True}, headers=headers)
+    assert response.status_code == 200, response.text
+    saved = json.loads((target / "auth.json").read_text())
+    assert saved["credential_pool"]["openai-codex"][0]["guardian_enabled"] is True
+    assert json.loads((tmp_path / "auth.json").read_text()) == store
+    response = client.patch(path, json={"guardian_enabled": False}, headers=headers)
+    assert response.status_code == 200, response.text
+    assert json.loads((target / "auth.json").read_text())["credential_pool"]["openai-codex"][0]["guardian_enabled"] is False
+
+
+@pytest.mark.parametrize("value", ["true", 1, {}])
+def test_guardian_checkbox_request_requires_boolean(value):
+    from pydantic import ValidationError
+    from hermes_cli.web_models import OAuthAccountUpdateBody
+    with pytest.raises(ValidationError):
+        OAuthAccountUpdateBody(guardian_enabled=value)
 
 
 def _tokens(account):

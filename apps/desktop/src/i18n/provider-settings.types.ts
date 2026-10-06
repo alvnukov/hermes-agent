@@ -4,6 +4,8 @@ export interface ProviderSettingsTranslations {
       accountPriority: (position: number) => string
       accountName: string
       useAccount: string
+      guardianEnabled: string
+      guardianHint: string
       renameAccount: string
       moveAccountUp: string
       moveAccountDown: string

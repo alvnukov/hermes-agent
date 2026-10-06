@@ -822,6 +822,7 @@ include = [
 ]
 
 [tool.setuptools.package-data]
+agent = ["guardian_resources/*"]
 hermes_cli = [
   "observability/schemas/*.json",
   "data/*.json",

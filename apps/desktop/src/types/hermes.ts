@@ -105,6 +105,8 @@ export interface OAuthAccount {
   owner_enabled?: boolean
   /** This profile's assignment toggle, independent of source availability. */
   configured_enabled?: boolean
+  /** Guardian selection for this profile assignment and originating account. */
+  guardian_enabled?: boolean
   missing?: boolean
   unavailable_reason?: string
   shared?: boolean

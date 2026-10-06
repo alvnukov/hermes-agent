@@ -6,6 +6,8 @@ export const frProviders: NonNullable<NonNullable<TranslationOverrides['settings
       accountPriority: position => `Priorité ${position}`,
       accountName: 'Nom du compte',
       useAccount: 'Utiliser dans ce profil',
+      guardianEnabled: 'Codex Guardian (expérimental)',
+      guardianHint: 'Vérifie les actions avec ce compte. Désactivé, Hermes vérifie les actions.',
       renameAccount: 'Renommer le compte',
       moveAccountUp: 'Monter',
       moveAccountDown: 'Descendre',

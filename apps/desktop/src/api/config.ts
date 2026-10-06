@@ -330,7 +330,7 @@ export async function listOAuthProviders(profile?: ProfileScope): Promise<OAuthP
 export function updateOAuthAccount(
   providerId: string,
   accountId: string,
-  update: { enabled?: boolean; label?: string; priority?: number },
+  update: { enabled?: boolean; guardian_enabled?: boolean; label?: string; priority?: number },
   profile?: ProfileScope
 ): Promise<{ ok: boolean }> {
   return window.hermesDesktop.api<{ ok: boolean }>({

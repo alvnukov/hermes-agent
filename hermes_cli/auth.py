@@ -984,7 +984,7 @@ _POOL_STATUS_FIELDS = (
     "last_status", "last_status_at", "last_error_code", "last_error_reason", "last_error_message",
     "last_error_reset_at", "status_cleared_at")
 _POOL_TOKEN_GENERATION_FIELDS = (
-    "access_token", "refresh_token", "expires_at", "expires_at_ms", "expires_in", "obtained_at",
+    "identity_generation", "access_token", "refresh_token", "expires_at", "expires_at_ms", "expires_in", "obtained_at",
     "last_refresh", "agent_key", "agent_key_expires_at", "agent_key_expires_in", "agent_key_id",
     "agent_key_obtained_at", "agent_key_reused",
     # Refresh-coupled metadata: a Nous refresh rewrites scope and the validated

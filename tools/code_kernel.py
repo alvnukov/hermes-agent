@@ -265,6 +265,7 @@ class CellAuthority:
 
     def _invoke(self, tool_name: str, tool_args: dict) -> str:
         from model_tools import handle_function_call
+        from agent.guardian_review import bind_nested_guardian_action
         previous = None
         if self._callbacks:
             try:
@@ -274,7 +275,8 @@ class CellAuthority:
             except Exception:
                 previous = None
         try:
-            return handle_function_call(tool_name, tool_args, task_id=self.task_id)
+            with bind_nested_guardian_action(tool_name, tool_args):
+                return handle_function_call(tool_name, tool_args, task_id=self.task_id)
         finally:
             if previous is not None:
                 try:
@@ -885,6 +887,11 @@ def _run_cell(kernel: SessionKernel, key: Tuple, code: str, *, task_id: str, chi
                 _spawn(kernel, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
                        sandbox_tools=sandbox_tools, max_tool_calls=max_tool_calls)
             assert kernel.proc is not None and kernel.proc.stdin is not None
+            from tools.approval_guardian import consume_current_allow
+            if not consume_current_allow("execute_code <<'PY'\n" + code + "\nPY", cwd=child_cwd,
+                                         kernel_execution_count=kernel.execution_count):
+                from tools.code_execution_tool import _error_result
+                return _error_result("BLOCKED: Guardian authorization changed or was already used; Python was not run.")
             # Per-cell tool budget: the RPC loop enforces counter < max; reset without restarting.
             kernel.tool_call_counter[0] = 0
             kernel.cell_log_start = len(kernel.tool_call_log)

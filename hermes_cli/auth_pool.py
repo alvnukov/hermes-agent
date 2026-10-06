@@ -2,6 +2,30 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+import uuid
+
+
+def _pool_identity_generation(entry, disk, *, explicit):
+    """Keep a login identity across refresh, replace it on an explicit new grant."""
+    if (not isinstance(entry, dict) or entry.get("auth_type") != "oauth"
+            or not (entry.get("access_token") or entry.get("refresh_token"))):
+        return entry
+    entry = dict(entry)
+    old = disk.get("identity_generation") if isinstance(disk, dict) else None
+    changed = explicit and disk is not None and (
+        entry.get("access_token"), entry.get("refresh_token")) != (
+        disk.get("access_token"), disk.get("refresh_token"))
+    generation = uuid.uuid4().hex if changed else (old or entry.get("identity_generation"))
+    if generation or explicit:
+        entry["identity_generation"] = generation or uuid.uuid4().hex
+    return entry
+
+
+def _stamp_codex_generations(provider_id, entries, existing_by_id, *, explicit):
+    if provider_id != "openai-codex":
+        return entries
+    return [_pool_identity_generation(e, existing_by_id.get(e.get("id")), explicit=explicit)
+            if isinstance(e, dict) else e for e in entries]
 
 def write_credential_pool(
     provider_id: str, entries: List[Dict[str, Any]], *,
@@ -30,6 +54,8 @@ def write_credential_pool(
         existing_list = pool.get(provider_id)
         existing_list = existing_list if isinstance(existing_list, list) else []
         existing_by_id = _auth._entry_ids(existing_list)
+        sanitized = _stamp_codex_generations(provider_id, sanitized, existing_by_id,
+                                             explicit=token_bases is None)
         tombstones = _auth._store_section(auth_store, "credential_pool_removed")
         deleted = set(tombstones.get(provider_id, [])) | removed
         controls = set(control_updated_ids or ())
@@ -45,7 +71,8 @@ def write_credential_pool(
                 entry = dict(entry)
                 disk = existing_by_id.get(cid)
                 if disk is not None and cid not in controls:
-                    for key in ("enabled", "label", "priority", "source", "owner_profile", "owner_credential_id"):
+                    for key in ("enabled", "label", "priority", "source", "owner_profile", "owner_credential_id",
+                                "guardian_enabled", "guardian_generation"):
                         if key in disk:
                             entry[key] = disk[key]
                         else:

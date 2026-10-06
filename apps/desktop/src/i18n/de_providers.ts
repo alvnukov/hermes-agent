@@ -6,6 +6,8 @@ export const deProviders: NonNullable<NonNullable<TranslationOverrides['settings
       accountPriority: position => `Priorität ${position}`,
       accountName: 'Kontoname',
       useAccount: 'In diesem Profil verwenden',
+      guardianEnabled: 'Codex Guardian (experimentell)',
+      guardianHint: 'Prüft Aktionen mit diesem Konto. Ohne Häkchen prüft Hermes.',
       renameAccount: 'Konto umbenennen',
       moveAccountUp: 'Nach oben',
       moveAccountDown: 'Nach unten',

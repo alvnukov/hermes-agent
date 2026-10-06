@@ -81,7 +81,9 @@ def _reference(entry, owner):
     from agent.credential_pool import PooledCredential
     canonical = PooledCredential.from_dict(entry.provider, owner)
     extra = {**entry.extra, **canonical.extra, "owner_profile": entry.extra.get("owner_profile"),
-             "owner_credential_id": entry.extra.get("owner_credential_id"), "_owner_enabled": canonical.enabled}
+             "owner_credential_id": entry.extra.get("owner_credential_id"), "_owner_enabled": canonical.enabled,
+             "guardian_enabled": entry.extra.get("guardian_enabled") is True,
+             "guardian_generation": entry.extra.get("guardian_generation", "")}
     if "failure_reason" not in canonical.extra:
         extra.pop("failure_reason", None)
     extra.pop("shared_unavailable", None)
@@ -115,6 +117,7 @@ def account_metadata(pool, entry):
     return {"id": live.id, "label": live.label, "priority": live.priority,
             "enabled": configured and owner_enabled and not reason,
             "configured_enabled": configured, "owner_enabled": owner_enabled,
+            "guardian_enabled": entry.extra.get("guardian_enabled") is True,
             "shared": shared, "owner_profile": "default" if inherited_owned else
             live.extra.get("owner_profile", _profile_name()),
             "owner_credential_id": live.id if inherited_owned else live.extra.get("owner_credential_id", live.id),
@@ -170,6 +173,8 @@ def _local_assignments(provider):
                     "id": entry.id, "label": entry.label, "priority": entry.priority,
                     "enabled": entry.enabled, "auth_type": entry.auth_type, "source": "shared",
                     "owner_profile": "default", "owner_credential_id": entry.id,
+                    "guardian_enabled": entry.extra.get("guardian_enabled") is True,
+                    "guardian_generation": entry.extra.get("guardian_generation", ""),
                 }))
             else:
                 entries.append(entry)
@@ -258,7 +263,7 @@ def link_account(provider, owner_profile, credential_id):
     return hydrate_reference(reference)
 
 
-def update_account(provider, credential_id, *, label=None, enabled=None, priority=None):
+def update_account(provider, credential_id, *, label=None, enabled=None, priority=None, guardian_enabled=None):
     _prepare_inherited_assignment(provider)
     with auth._auth_store_lock():
         pool = _local_assignments(provider)
@@ -269,16 +274,24 @@ def update_account(provider, credential_id, *, label=None, enabled=None, priorit
             raise ValueError("Account label must not be empty")
         if enabled is not None and not isinstance(enabled, bool):
             raise ValueError("Enabled must be a boolean")
+        if guardian_enabled is not None and not isinstance(guardian_enabled, bool):
+            raise ValueError("Guardian enabled must be a boolean")
         updates = {}
         if label is not None:
             updates["label"] = label.strip()
         if enabled is not None:
             updates["enabled"] = enabled
+            if provider == "openai-codex" and enabled != entry.enabled:
+                # A complete off/on cycle must revoke approvals even when no
+                # resolver observed the account during its disabled interval.
+                updates["extra"] = {**entry.extra, "guardian_generation": uuid.uuid4().hex}
         if updates:
             pool._replace_entry(entry, replace(entry, **updates))
             pool._persist(control_updated_ids=[entry.id])
         if priority is not None:
             pool.move_entry(credential_id, priority)
+        if guardian_enabled is not None:
+            pool.set_guardian_enabled(credential_id, guardian_enabled)
         _select_explicitly(provider)
         return pool._find(lambda e: e.id == credential_id)
 

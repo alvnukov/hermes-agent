@@ -795,6 +795,8 @@ export const arSettings = {
       accountPriority: position => `الأولوية ${position}`,
       accountName: 'اسم الحساب',
       useAccount: 'استخدام في هذا الملف الشخصي',
+      guardianEnabled: 'Codex Guardian (تجريبي)',
+      guardianHint: 'يراجع الإجراءات باستخدام هذا الحساب. عند إيقافه يراجع Hermes الإجراءات.',
       renameAccount: 'إعادة تسمية الحساب',
       moveAccountUp: 'نقل لأعلى',
       moveAccountDown: 'نقل لأسفل',

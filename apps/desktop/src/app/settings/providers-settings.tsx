@@ -48,6 +48,7 @@ import { providerGroup, providerMeta, providerPriority } from './helpers'
 import { LocalModelsSettings } from './local-models-settings'
 import { SettingsContent, SettingsSkeleton } from './primitives'
 import { SettingsProfileScope } from './profile-scope'
+import { GuardianAccountCheckbox } from './provider-guardian-checkbox'
 import { useDeepLinkHighlight } from './use-deep-link-highlight'
 
 // The embedded terminal (and thus the "run disconnect command" path) only
@@ -399,9 +400,17 @@ function ProviderAccounts({
 }
 
 function providerAccountStatus(account: OAuthAccount) {
-  if (account.missing) return 'unavailable'
-  if (account.enabled === false || account.owner_enabled === false) return 'disabled'
-  if (account.last_status === 'dead' || account.last_status === 'exhausted') return account.last_status
+  if (account.missing) {
+    return 'unavailable'
+  }
+
+  if (account.enabled === false || account.owner_enabled === false) {
+    return 'disabled'
+  }
+
+  if (account.last_status === 'dead' || account.last_status === 'exhausted') {
+    return account.last_status
+  }
 
   return 'ready'
 }
@@ -455,7 +464,7 @@ function ProviderAccountRow({
     }
   }
 
-  const update = (value: { enabled?: boolean; label?: string; priority?: number }) =>
+  const update = (value: { enabled?: boolean; guardian_enabled?: boolean; label?: string; priority?: number }) =>
     void write(() => updateOAuthAccount(providerId, account.id, value, scope)).catch(() => undefined)
 
   function remove() {
@@ -549,6 +558,13 @@ function ProviderAccountRow({
           </div>
         )}
       </div>
+      <GuardianAccountCheckbox
+        account={account}
+        management={management}
+        onChange={guardian_enabled => update({ guardian_enabled })}
+        pending={pending}
+        providerId={providerId}
+      />
       {editing && (
         <form
           className="flex items-center gap-2"

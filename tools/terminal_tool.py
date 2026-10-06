@@ -1237,72 +1237,7 @@ def _yield_kwargs(command: str, **ctx) -> dict:
     return {"yield_handler": handler} if handler is not None else {}
 
 
-def _run_foreground(
-    command: str, env: Any, plan: _ExecPlan, *,
-    task_id: Optional[str], session_id: Optional[str], session_key: str,
-    workdir: Optional[str], approval_note: Optional[str], clear_interrupt: bool,
-    metered: bool = True,
-) -> str:
-    """Execute in the foreground with retry on transient errors, then finalize. ``metered``
-    is False for Hermes' own control-plane commands (``_host_local``)."""
-    from hermes_cli.observability.shared_metrics_harness import record_terminal_outcome
-    max_retries = 3
-    env_type, eff, effective_timeout = plan.env_type, plan.effective_task_id, plan.effective_timeout
-
-    # Clean interrupt slate for an approved command, ONCE before the retry
-    # loop: drop a stale bit that landed during the approval-wait so it
-    # can't SIGINT the just-approved run. Do NOT re-clear inside the loop —
-    # a genuine interrupt during the backoff sleep must survive and abort
-    # the next attempt (rc 130).
-    if clear_interrupt:
-        from tools.interrupt import clear_current_thread_interrupt
-        clear_current_thread_interrupt()
-
-    for retry_count in range(max_retries + 1):
-        try:
-            command_cwd = _resolve_command_cwd(
-                workdir=workdir, default_cwd=plan.cwd, session_key=session_key, env_type=env_type,
-                mounted_host=getattr(env, "host_cwd", None) or plan.host_cwd,
-                env=env,
-            )
-            # bounded_capture: model-facing output keeps a head/tail window
-            # while streaming so a verbose command can't OOM the gateway;
-            # internal env.execute() consumers stay unbounded.
-            result = env.execute(
-                command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
-                **_yield_kwargs(command, env_type=env_type, cwd=command_cwd, effective_task_id=eff,
-                                task_id=task_id, session_key=session_key),
-            )
-            break
-        except Exception as e:
-            # A backend exception (e.g. an SSH connect timeout) never reached an exit status, so it
-            # is not a terminal outcome; Hermes' own deadline arrives as ``hermes_timed_out``.
-            if "timeout" in str(e).lower():
-                return _error_json(f"Command timed out after {effective_timeout} seconds", exit_code=124)
-            # Retry on transient errors
-            if retry_count < max_retries:
-                wait_time = 2 ** (retry_count + 1)
-                logger.warning("Execution error, retrying in %ds (attempt %d/%d) - Command: %s - Error: %s: %s - Task: %s, Backend: %s",
-                               wait_time, retry_count + 1, max_retries, _safe_command_preview(command), type(e).__name__, e, eff, env_type)
-                time.sleep(wait_time)
-                continue
-            logger.error("Execution failed after %d retries - Command: %s - Error: %s: %s - Task: %s, Backend: %s",
-                         max_retries, _safe_command_preview(command), type(e).__name__, e, eff, env_type)
-            return _error_json(_redact_terminal_error_text(f"Command execution failed: {type(e).__name__}: {e}"))
-
-    if result.get("yielded_session_id"):  # handed to the background: no exit status yet
-        return json.dumps({
-            "output": result.get("output", ""), "exit_code": None, "error": None,
-            "status": "yielded_to_background", "session_id": result["yielded_session_id"],
-            "pid": result.get("pid"), "notify_on_complete": True, "note": _YIELDED_NOTE,
-        }, ensure_ascii=False)
-    if metered:
-        record_terminal_outcome(command, env_type, result)
-    return finalize_foreground_result(
-        command=command, result=result, env=env, env_type=env_type, effective_task_id=eff,
-        task_id=task_id, session_id=session_id, session_key=session_key, workdir=workdir,
-        command_cwd=command_cwd, approval_note=approval_note,
-    )
+from tools.terminal_tool_foreground import _run_foreground  # noqa: E402, F401
 
 
 # Floor for the pre-exec guard's share of the command deadline: a short command timeout

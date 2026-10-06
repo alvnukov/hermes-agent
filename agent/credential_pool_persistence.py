@@ -66,7 +66,8 @@ def _update_root_pool_rows(
                 incoming, disk_entry, provider,
                 base_pair=bases.get(did), status_cleared=did in cleared,
             )
-            for key in ("enabled", "label", "priority", "source", "owner_profile", "owner_credential_id"):
+            for key in ("enabled", "label", "priority", "source", "owner_profile", "owner_credential_id",
+                        "guardian_enabled", "guardian_generation"):
                 if key in disk_entry:
                     updated[key] = disk_entry[key]
                 else:

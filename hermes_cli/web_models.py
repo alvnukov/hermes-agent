@@ -264,6 +264,7 @@ class OAuthAccountLinkBody(BaseModel):
 class OAuthAccountUpdateBody(BaseModel):
     label: Optional[str] = Field(default=None, min_length=1, max_length=128)
     enabled: Optional[StrictBool] = None
+    guardian_enabled: Optional[StrictBool] = None
     priority: Optional[int] = Field(default=None, ge=0, le=10000)
 
 class BulkDeleteSessions(BaseModel):

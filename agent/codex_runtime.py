@@ -858,6 +858,7 @@ class _CodexResponseAssembler:
     terminal_service_tier = None  # the tier the backend SERVED (may differ from the one requested)
     # terminal_status defaults to "completed", so settlement needs an explicitly observed response.completed frame.
     saw_response_completed = False
+    guardian_response_id_conflict = False
 
     def __init__(self, *, model, on_text_delta, on_reasoning_delta, on_commentary_message, on_first_delta):
         self.model, self.on_text_delta, self.on_reasoning_delta = model, on_text_delta, on_reasoning_delta
@@ -976,7 +977,8 @@ class _CodexResponseAssembler:
         self.saw_terminal = True
         resp_obj = _event_field(event, "response")
         if resp_obj is not None:
-            self.terminal_usage, self.terminal_response_id = _event_field(resp_obj, "usage"), _event_field(resp_obj, "id")
+            self.terminal_usage = _event_field(resp_obj, "usage")
+            self._remember_response_id(resp_obj)
             self.terminal_service_tier = _event_field(resp_obj, "service_tier")
             rstatus = _event_field(resp_obj, "status")
             if isinstance(rstatus, str):
@@ -989,9 +991,20 @@ class _CodexResponseAssembler:
         self.terminal_status = self.terminal_status or event_type.removeprefix("response.")
         return True
 
+    def _remember_response_id(self, response: Any) -> None:
+        response_id = _event_field(response, "id")
+        if isinstance(response_id, str) and response_id:
+            if self.terminal_response_id and self.terminal_response_id != response_id:
+                self.guardian_response_id_conflict = True
+            self.terminal_response_id = response_id
+
+    def _on_created(self, event: Any, event_type: str) -> None:
+        self._remember_response_id(_event_field(event, "response"))
+
     # Exact-type handlers first, then substring-matched ones in priority order. ``error`` frames
     # carry the provider's real failure reason; raise so the credential pool + classifier see the body.
     _EXACT_HANDLERS = {
+        "response.created": _on_created,
         "error": lambda self, event, event_type: _raise_stream_error(event),
         "response.output_item.added": _on_item_added, "response.output_item.done": _on_item_done,
         "response.completed": _on_terminal, "response.incomplete": _on_terminal, "response.failed": _on_terminal,
@@ -1045,7 +1058,9 @@ class _CodexResponseAssembler:
         return SimpleNamespace(
             output=output, output_text="".join(self.text_deltas), usage=self.terminal_usage, status=self.terminal_status,
             id=self.terminal_response_id, model=self.model, incomplete_details=self.terminal_incomplete_details,
-            error=self.terminal_error, service_tier=self.terminal_service_tier)
+            error=self.terminal_error, service_tier=self.terminal_service_tier,
+            guardian_completed=(self.saw_response_completed and self.terminal_status == "completed"
+                                and not self.guardian_response_id_conflict))
 
 
 def _consume_codex_event_stream(
@@ -1108,6 +1123,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     from agent import relay_llm
     transport_errors = (_httpx.RemoteProtocolError, _httpx.ReadTimeout, _httpx.ReadError, _httpx.ConnectError, ConnectionError)
     active_client = client or agent._ensure_primary_openai_client(reason="codex_stream_direct")
+    guardian_attempt = None
     max_stream_retries, model = 1, api_kwargs.get("model")
     # Accumulate streamed text so callers / compat shims can read it.
     agent._codex_streamed_text_parts: list = []
@@ -1186,6 +1202,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         return bool(agent._interrupt_requested)
 
     def _open_codex_stream(next_api_kwargs: dict[str, Any]):
+        nonlocal guardian_attempt
         from hermes_cli.providers import is_actual_route
 
         if is_actual_route(
@@ -1196,6 +1213,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 "Actual requests require Chat Completions; refusing to call /responses."
             )
         stream_kwargs = _sanitize_consumer_codex_request(agent, next_api_kwargs)
+        from agent.guardian_provenance import prepare_main_request
+        stream_kwargs, guardian_attempt = prepare_main_request(agent, active_client, stream_kwargs)
         stream_kwargs["stream"] = True
         return active_client.responses.create(**bypass_sdk_request_transform(stream_kwargs))
 
@@ -1301,6 +1320,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     call_role = ("delegated" if getattr(agent, "is_subagent", False)
                  else "fallback" if int(getattr(agent, "_fallback_index", 0) or 0) > 0 else "primary")
     for attempt in range(max_stream_retries + 1):
+        from agent.guardian_provenance import unproved_main_attempt
+        guardian_attempt = unproved_main_attempt(agent, active_client, api_kwargs)
         if not _request_is_current():
             raise TimeoutError("Codex Responses stream request retired before retry")
         if agent._interrupt_requested:
@@ -1352,7 +1373,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             except RuntimeError:
                 # "No terminal response"; Relay may still hold a finalizer-assembled response.
                 if event_stream is not None and event_stream.final_response is not None:
-                    return event_stream.final_response
+                    final = event_stream.final_response
+                    final._guardian_attempt = guardian_attempt
+                    return final
                 raise
             except _APIConnectionError as exc:
                 # The SDK wraps every connect/receive failure (``raise APIConnectionError from err``), so the
@@ -1375,6 +1398,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                                "(incomplete_details=%s, error=%s, streamed_chars=%d). %s",
                                final.status, final.incomplete_details, final.error,
                                sum(len(p) for p in agent._codex_streamed_text_parts), agent._client_log_context())
+            final._guardian_attempt = guardian_attempt
             return final
         finally:
             # relay_llm.stream is ManagedLlmStream, whose close() always owns the provider stream; only

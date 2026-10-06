@@ -156,7 +156,7 @@ def spawn_background_process(
     """
     from tools.process_registry import process_registry
     from tools.terminal_tool import (
-        _redact_terminal_error_text, _resolve_command_cwd, _resolve_notification_flag_conflict,
+        _error_json, _redact_terminal_error_text, _resolve_command_cwd, _resolve_notification_flag_conflict,
     )
 
     effective_cwd = _resolve_command_cwd(
@@ -164,6 +164,9 @@ def spawn_background_process(
         mounted_host=mounted_host if mounted_host is not None else getattr(env, "host_cwd", None),
         env=env,
     )
+    from tools.approval_guardian import consume_current_allow
+    if not consume_current_allow(command, cwd=effective_cwd):
+        return _error_json("BLOCKED: Guardian authorization changed or was already used; command was not run.", status="blocked")
     try:
         proc_session = _spawn(
             process_registry, env=env, env_type=env_type, command=command, cwd=effective_cwd,

@@ -6,6 +6,8 @@ export const enProviders: ProviderSettingsTranslations = {
       accountPriority: position => `Priority ${position}`,
       accountName: 'Account name',
       useAccount: 'Use in this profile',
+      guardianEnabled: 'Codex Guardian (experimental)',
+      guardianHint: 'Reviews actions with this account. Off uses Hermes approvals.',
       renameAccount: 'Rename account',
       moveAccountUp: 'Move up',
       moveAccountDown: 'Move down',

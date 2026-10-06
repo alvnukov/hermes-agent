@@ -839,6 +839,29 @@ describe('ProvidersSettings', () => {
 })
 
 describe('OAuth account API routing', () => {
+  it('saves the Guardian checkbox for only its originating Codex account and profile', async () => {
+    const value = provider('openai-codex', true, {
+      supports_account_management: true,
+      accounts: [
+        { id: 'first', label: 'Personal', priority: 0, guardian_enabled: false },
+        { id: 'second', label: 'Work', priority: 1, guardian_enabled: true }
+      ]
+    })
+
+    bindConfigReadOrigin(value, { connectionId: 'connection-a', profile: 'alpha' })
+    listOAuthProviders.mockResolvedValue({ providers: [value] })
+    render(<ProvidersSettings onClose={vi.fn()} onViewChange={vi.fn()} view="accounts" />)
+    const personal = await screen.findByRole('listitem', { name: 'Personal' })
+    const work = screen.getByRole('listitem', { name: 'Work' })
+    const checkbox = within(personal).getByRole('checkbox', { name: 'Codex Guardian (experimental)' })
+    expect(checkbox.getAttribute('data-state')).toBe('unchecked')
+    expect(within(work).getByRole('checkbox', { name: 'Codex Guardian (experimental)' }).getAttribute('data-state')).toBe('checked')
+    fireEvent.click(checkbox)
+    await waitFor(() => expect(updateOAuthAccount).toHaveBeenCalledWith(
+      'openai-codex', 'first', { guardian_enabled: true }, expect.objectContaining({ profile: 'alpha', connectionId: 'connection-a' })
+    ))
+  })
+
   it('pins every account request to the connection and profile that served its list', async () => {
     const api = vi.fn(async (request: { method?: string }) =>
       request.method ? { ok: true } : { providers: [provider('openai-codex', true)] }

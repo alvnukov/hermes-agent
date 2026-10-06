@@ -6,6 +6,8 @@ export const ruProviders: NonNullable<NonNullable<TranslationOverrides['settings
       accountPriority: position => `Приоритет ${position}`,
       accountName: 'Название аккаунта',
       useAccount: 'Использовать в этом профиле',
+      guardianEnabled: 'Codex Guardian (экспериментально)',
+      guardianHint: 'Проверяет действия через этот аккаунт. Без галочки используются проверки Hermes.',
       renameAccount: 'Переименовать аккаунт',
       moveAccountUp: 'Поднять',
       moveAccountDown: 'Опустить',

@@ -125,6 +125,8 @@ def normalize_model_response(
     """Normalize ``response`` into ``assistant_message`` (str content, never dict/list) and run
     the post-response hooks and continuation guards, in the original order."""
     assistant_message = normalize_response_for_agent(agent, response)
+    from agent.guardian_provenance import bind_response_actions
+    bind_response_actions(agent, response, assistant_message, api_messages)
     finish_reason = assistant_message.finish_reason
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ResponseIntakeVerdict:

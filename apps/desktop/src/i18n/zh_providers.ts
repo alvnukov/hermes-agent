@@ -6,6 +6,8 @@ export const zhProviders: NonNullable<NonNullable<TranslationOverrides['settings
       accountPriority: position => `优先级 ${position}`,
       accountName: '账号名称',
       useAccount: '在此配置档中使用',
+      guardianEnabled: 'Codex Guardian（实验性）',
+      guardianHint: '使用此账号审核操作。关闭时由 Hermes 审核。',
       renameAccount: '重命名账号',
       moveAccountUp: '上移',
       moveAccountDown: '下移',

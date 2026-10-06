@@ -290,6 +290,7 @@ def terminal_approval_batch(agent, calls, messages, task_id):
     from gateway.session_context import get_session_env
     from tools import approval
     from agent.tool_executor import _parse_tool_call
+    from agent.guardian_review import backend_for_call
     if (len(calls) < 2 or get_session_env("HERMES_SESSION_SOURCE") != "desktop"
             or approval._gateway_notify_cb(approval.get_current_session_key()) is None):
         yield
@@ -299,7 +300,8 @@ def terminal_approval_batch(agent, calls, messages, task_id):
     # malformed calls with the established sequential path.
     ids = [pc.ref(task_id).call_id for pc in parsed]
     if (any(pc.name != "terminal" or pc.parse_error is not None for pc in parsed)
-            or not all(ids) or len(set(ids)) != len(ids)):
+            or not all(ids) or len(set(ids)) != len(ids)
+            or any(backend_for_call(agent, call_id) != "legacy" for call_id in ids)):
         yield
         return
     batch = _TerminalBatch(agent, messages, task_id, parsed)

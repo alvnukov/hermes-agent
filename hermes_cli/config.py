@@ -36,6 +36,7 @@ import hermes_yaml as yaml
 from hermes_cli.cli_output import line_input
 from hermes_cli.colors import Colors, color
 from hermes_cli import managed_scope
+from hermes_cli.config_validation_general import _validate_guardian, _validate_timezone, _validate_voice
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
 # Managed-mode, container and HERMES_UID/GID policy live in hermes_constants (import-safe);
@@ -1062,50 +1063,6 @@ _FB_SINGLE_REQUIRED_FIELDS = (
     ("model", "Add: model: anthropic/claude-sonnet-4 (or another model)"))
 
 
-def _validate_voice(config: Dict[str, Any], issues: List[ConfigIssue]) -> None:
-    voice_cfg = config.get("voice")
-    if not (isinstance(voice_cfg, dict) and "submit_mode" in voice_cfg):
-        return
-    submit_mode = voice_cfg.get("submit_mode")
-    normalized = submit_mode.strip().lower() if isinstance(submit_mode, str) else None
-    if normalized not in {"direct", "draft"}:
-        _issue(issues, "error", f"voice.submit_mode must be 'direct' or 'draft', got {submit_mode!r}",
-               "Set voice.submit_mode to direct (submit immediately) or draft (edit before sending)")
-
-
-def _validate_timezone(config: Dict[str, Any], issues: List[ConfigIssue]) -> None:
-    """``timezone`` must be an IANA name the runtime can load.
-
-    ``hermes_time._get_zoneinfo()`` swallows an invalid name behind a single WARNING in the
-    gateway log, then runs the agent clock AND every cron schedule on server-local time.
-    Surface it here, where doctor and the startup check both look. Silent when the
-    interpreter has no tz database at all (bare Windows without ``tzdata``) — nothing can be
-    judged there.
-    """
-    if "timezone" not in config:
-        return
-    tz = config.get("timezone")
-    hint = ("Use an IANA zone name such as America/New_York or Asia/Tokyo (see "
-            "`timedatectl list-timezones`). With an invalid value the agent clock and cron "
-            "schedules silently fall back to server-local time. HERMES_TIMEZONE overrides "
-            "this key when set.")
-    if tz is not None and not isinstance(tz, str):
-        _issue(issues, "error", f"timezone must be an IANA zone name string, got {tz!r}", hint)
-        return
-    if not (isinstance(tz, str) and tz.strip()):
-        return
-    name = tz.strip()
-    try:
-        import zoneinfo
-        zoneinfo.ZoneInfo("UTC")  # is a tz database available at all?
-    except Exception:
-        return
-    try:
-        zoneinfo.ZoneInfo(name)
-    except Exception:
-        _issue(issues, "error", f"timezone {name!r} is not a valid IANA zone name", hint)
-
-
 def _validate_entry_list(
     entries: list, label: str, issues: List[ConfigIssue], fields, *, non_dict: Tuple[str, str, str],
 ) -> None:
@@ -1236,8 +1193,8 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
             return [config_load_issue(exc)]
 
     issues: List[ConfigIssue] = []
-    _validate_voice(config, issues)
-    _validate_timezone(config, issues)
+    for validator in (_validate_voice, _validate_timezone, _validate_guardian):
+        validator(config, issues)
     cp = config.get("custom_providers")
     fb = config.get("fallback_model")
     for value, validator in ((cp, _validate_custom_providers), (fb, _validate_fallback_model)):

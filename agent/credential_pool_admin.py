@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from dataclasses import replace
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
@@ -16,6 +17,22 @@ def _cleared_status_copy(entry: PooledCredential) -> PooledCredential:
     # "never had a status" — both read as bare None on disk (#89415).
     return replace(entry, **_CLEAR_STATUS, model_cooldowns=None, status_cleared_at=time.time(),
                    extra={k: v for k, v in entry.extra.items() if k != "failure_reason"})
+
+
+def sync_entry_controls(entry: PooledCredential, disk: dict) -> PooledCredential:
+    """Adopt peer assignment settings while leaving a live token pair untouched."""
+    updates = {"enabled": disk.get("enabled", True), "label": disk.get("label", entry.label),
+               "priority": disk.get("priority", entry.priority)}
+    extra = dict(entry.extra)
+    for key, default in (("guardian_enabled", False), ("guardian_generation", "")):
+        value = disk.get(key, default)
+        if extra.get(key, default) != value:
+            extra[key] = value
+    if extra != entry.extra:
+        updates["extra"] = extra
+    if any(getattr(entry, key) != value for key, value in updates.items()):
+        return replace(entry, **updates)
+    return entry
 
 
 def sync_shared_accounts(pool, entries, rows):
@@ -36,6 +53,25 @@ def sync_shared_accounts(pool, entries, rows):
 
 
 class CredentialPoolAdminMixin:
+    def set_guardian_enabled(self, credential_id: str, enabled: bool) -> Optional[PooledCredential]:
+        """Change the approval backend for this assignment without copying its tokens."""
+        if self.provider != "openai-codex":
+            raise ValueError("Guardian requires a Codex subscription account")
+        if not isinstance(enabled, bool):
+            raise ValueError("Guardian enabled must be a boolean")
+        with self._lock:
+            self._sync_live_controls()
+            entry = self._find(lambda e: e.id == credential_id)
+            if entry is None:
+                return None
+            extra = {**entry.extra, "guardian_enabled": enabled}
+            if entry.extra.get("guardian_enabled", False) != enabled or not extra.get("guardian_generation"):
+                extra["guardian_generation"] = uuid.uuid4().hex
+            updated = replace(entry, extra=extra)
+            self._replace_entry(entry, updated)
+            self._persist(control_updated_ids=[credential_id])
+            return self._find(lambda e: e.id == credential_id)
+
     def reset_status(self, credential_id: str) -> Optional[PooledCredential]:
         """Clear only the target's local error state, preserving sibling cooldowns."""
         with self._lock:

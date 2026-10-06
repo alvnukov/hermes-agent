@@ -7,7 +7,7 @@ from agent.credential_pool_persistence import (
     persist_pool_entries,
 )
 
-from agent.credential_pool_admin import CredentialPoolAdminMixin, sync_shared_accounts
+from agent.credential_pool_admin import CredentialPoolAdminMixin, sync_entry_controls, sync_shared_accounts
 from agent.credential_pool_model_cooldowns import CredentialPoolModelCooldownMixin, model_cooldown_until
 
 import logging
@@ -1001,10 +1001,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 if disk.get("source") == "shared" and (entry.source != "shared" or
                     any(entry.extra.get(key) != disk.get(key) for key in ("owner_profile", "owner_credential_id"))):
                     entry = PooledCredential.from_dict(self.provider, disk)
-                updates = {"enabled": disk.get("enabled", True), "label": disk.get("label", entry.label),
-                           "priority": disk.get("priority", entry.priority)}
-                if any(getattr(entry, key) != value for key, value in updates.items()):
-                    entry = replace(entry, **updates)
+                entry = sync_entry_controls(entry, disk)
             live.append(hydrate_reference(entry))
         self._entries = sync_shared_accounts(self, live, rows)
 
@@ -1325,6 +1322,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 }
                 if state.get("last_refresh"):
                     field_updates["last_refresh"] = state["last_refresh"]
+                if is_codex and state.get("identity_generation"):
+                    field_updates["extra"] = {**entry.extra, "identity_generation": state["identity_generation"]}
                 return self._adopt(entry, **field_updates)
         except Exception as exc:
             logger.debug("Failed to sync %s entry from auth.json: %s", display, exc)
@@ -2785,6 +2784,7 @@ def _seed_tokens_singleton(seed: _Seeder, auth_store: Dict[str, Any]) -> None:
         "refresh_token": tokens.get("refresh_token"),
         "base_url": base_url,
         "last_refresh": state.get("last_refresh"),
+        "identity_generation": state.get("identity_generation"),
         "label": custom_label or label_from_token(tokens.get("access_token", ""), "device_code"),
     })
 

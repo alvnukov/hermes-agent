@@ -6,6 +6,8 @@ export const jaProviders: NonNullable<NonNullable<TranslationOverrides['settings
       accountPriority: position => `優先順位 ${position}`,
       accountName: 'アカウント名',
       useAccount: 'このプロフィールで使用',
+      guardianEnabled: 'Codex Guardian（試験機能）',
+      guardianHint: 'このアカウントで操作を審査します。オフの場合は Hermes が審査します。',
       renameAccount: 'アカウント名を変更',
       moveAccountUp: '上へ移動',
       moveAccountDown: '下へ移動',

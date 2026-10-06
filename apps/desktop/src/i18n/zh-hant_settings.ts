@@ -1398,6 +1398,8 @@ export const zhHantSettings = {
       accountPriority: position => `優先順序 ${position}`,
       accountName: '帳號名稱',
       useAccount: '在此設定檔中使用',
+      guardianEnabled: 'Codex Guardian（實驗性）',
+      guardianHint: '使用此帳號審核操作。關閉時由 Hermes 審核。',
       renameAccount: '重新命名帳號',
       moveAccountUp: '上移',
       moveAccountDown: '下移',

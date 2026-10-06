@@ -770,12 +770,29 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
     counts toward the denial breaker even when an owner may override it. ESCALATE follows the
     normal, potentially persistent manual behavior.
     """
-    verdict = _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
+    from tools.approval_guardian import get_approval_backend, guardian_smart_verdict
+    backend = get_approval_backend()
+    guardian = backend != "legacy"
+    if backend == "invalid":
+        verdict = "escalate"
+    elif guardian:
+        verdict = guardian_smart_verdict(command, description, pattern_key, pattern_keys, session_key)
+    else:
+        verdict = _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
     if verdict == "approve":
         _reset_denials(session_key)
-        logger.debug(spec.smart_log.format(command=command[:60], description=description, session_key=session_key))
-        return {"approved": True, "message": None, "smart_approved": True, "description": description}, False
+        if guardian:
+            logger.debug("Codex Guardian authorized the current action")
+        else:
+            logger.debug(spec.smart_log.format(command=command[:60], description=description, session_key=session_key))
+        result = {"approved": True, "message": None, "smart_approved": True, "description": description}
+        if guardian:
+            result["guardian_approved"] = True
+        return result, False
     if verdict != "deny":
+        if guardian and not human_present:
+            return {"approved": False, "guardian_escalated": True,
+                    "message": "BLOCKED: Codex Guardian could not authorize this action and no human can approve it."}, False
         return None, False
     _record_denial(session_key)
     if human_present:
@@ -784,8 +801,9 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
         # Unattended programmatic platforms (webhook/msgraph_webhook/ api_server): respect unattended_mode
         # config. Resolves instantly — never a pending approval nobody can answer (#37284, #87509).
         "approved": False,
-        "message": (f"BLOCKED by smart approval: {description}. The command was assessed as genuinely "
-                    f"dangerous. Do NOT retry.{_denial_breaker_addendum(session_key)}"),
+        "message": (("BLOCKED by Codex Guardian: this action requires explicit owner approval. Do NOT retry."
+                     if guardian else f"BLOCKED by smart approval: {description}. The command was assessed as genuinely "
+                     "dangerous. Do NOT retry.") + _denial_breaker_addendum(session_key)),
         "smart_denied": True,
     }, True
 
@@ -1191,29 +1209,20 @@ def check_all_command_guards(command: str, env_type: str,
         return _approved()
 
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
-    # Outside CLI/gateway/ask flows we never block on approvals: each
-    # unattended context applies its configured deny/approve mode, else allow.
+    # Preserve explicit unattended trust and legacy no-UI behavior. An opt-in
+    # Guardian action without that trust still requires its per-action review.
     if not is_cli and not is_gateway and not is_ask:
-        for ctx in _unattended_contexts():
+        contexts = _unattended_contexts()
+        for ctx in contexts:
             result = _unattended_deny(command, ctx)
             if result is not None:
                 return result
-        return _approved()
+        from tools.approval_guardian import guardian_smart_enabled
+        if contexts or not guardian_smart_enabled(approval_mode):
+            return _approved()
 
-    # Gather findings: warnings = [(pattern_key, description, is_tirith)]. Tirith block AND warn both go through the
-    # approval flow (block used to be a hard stop) so users can inspect the findings and approve.
-    tirith_result = _tirith_scan(command)
-    is_dangerous, pattern_key, description = detect_dangerous_command(command)
-    warnings = []
-    session_key = get_current_session_key()
-    if tirith_result["action"] in {"block", "warn"}:
-        findings = tirith_result.get("findings") or []
-        rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
-        tirith_key = f"tirith:{rule_id}"
-        if not is_approved(session_key, tirith_key):
-            warnings.append((tirith_key, _format_tirith_description(tirith_result), True))
-    if is_dangerous and not is_approved(session_key, pattern_key):
-        warnings.append((pattern_key, description, False))
+    from tools.approval_command_findings import command_findings
+    session_key, warnings = command_findings(command)
     if not warnings:
         return _approved()
 
@@ -1279,12 +1288,14 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
             )
         return _approved()
 
-    # Only gateway/ask contexts get the one-shot whole-script approval. In an interactive CLI the script's terminal()
+    # Legacy only prompts gateway/ask contexts for the whole script. Checked Guardian
+    # accounts also review the script in CLI/no-UI flows. In a legacy CLI the script's terminal()
     # calls are guarded per-call (context propagates into the RPC thread, #33057), so a whole-script prompt would fire
     # on every execute_code call. Ask-mode still takes this path even with INTERACTIVE set (how gateway/smart tests
     # and messaging ask-mode drive whole-script approval); when that leaks into a CLI with no notify callback, the
     # engine falls through to the CLI Dangerous Command panel instead of a silent pending_approval.
-    if not is_gateway and not is_ask:
+    from tools.approval_guardian import guardian_smart_enabled
+    if not is_gateway and not is_ask and not guardian_smart_enabled(approval_mode):
         return _approved()
 
     session_key = get_current_session_key()
