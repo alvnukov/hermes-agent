@@ -51,6 +51,8 @@ jobs:
           "$HERMES_PYTHON" kanban_budget_apply.py
           git diff --check
           "$HERMES_PYTHON" -m py_compile gateway/run.py tools/environments/local.py hermes_cli/cli_init_mixin.py hermes_cli/iteration_env.py
+      - name: Validate profile boundary collection before the subprocess matrix
+        run: scripts/run_tests.sh tests/tools/test_iteration_env_profile_boundary.py tests/hermes_cli/test_kanban_budget_stop_reasons.py --tb=short
       - name: Green regression and focused compatibility tests
         run: |
           scripts/run_tests.sh --file-timeout 600 tests/hermes_cli/test_kanban_worker_iteration_budget.py tests/tools/test_iteration_env_profile_boundary.py tests/hermes_cli/test_kanban_budget_stop_reasons.py tests/hermes_cli/test_kanban_worker_terminal_scope.py tests/hermes_cli/test_kanban_worker_spawn_toolsets.py tests/hermes_cli/test_resolve_turn_limit.py tests/hermes_cli/test_managed_scope_env.py tests/gateway/test_config_env_bridge_authority.py tests/gateway/test_runtime_env_reload_config_authority.py tests/gateway/test_startup_agent_budget_log.py tests/gateway/test_multiplex_residue_parity.py tests/gateway/test_host_gateway_profile_env.py tests/agent/test_iteration_budget_race.py tests/agent/test_run_budget.py tests/agent/test_turn_finalizer_iteration_limit_exit.py --tb=short 2>&1 | tee "$RUNNER_TEMP/green.log"
