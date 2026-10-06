@@ -1608,7 +1608,7 @@ def _bridge_max_turns_from_config(home: "Path") -> None:
         cfg = _load_bridge_config(config_path)
     except Exception:
         return
-    _bridge_max_turns_to_env(cfg.get("agent", {}))
+    _bridge_max_turns_to_env(cfg.get("agent", {}), source_home=home)
     _bridge_section_to_env(cfg.get("sessions", {}), _SESSIONS_ENV_BRIDGE)
 
 
@@ -2001,17 +2001,14 @@ def _bridge_section_to_env(section: Any, mapping: Dict[str, str]) -> None:
                 os.environ[env_var] = str(section[cfg_key])
 
 
-def _bridge_max_turns_to_env(agent_cfg: Any) -> None:
+def _bridge_max_turns_to_env(agent_cfg: Any, *, source_home: "Path | None" = None) -> None:
     """Bridge ``agent.max_turns`` preserving its raw spelling ("none", "unlimited", "120"); Python None
     (`null` / bare `key:`) clears a stale bridge instead, since str(None) -> "None" would map to the
     unlimited sentinel rather than "absent = default"."""
     if not isinstance(agent_cfg, dict) or "max_turns" not in agent_cfg:
         return
-    raw = agent_cfg["max_turns"]
-    if raw is not None:
-        os.environ["HERMES_MAX_ITERATIONS"] = str(raw)
-    elif "HERMES_MAX_ITERATIONS" in os.environ:
-        del os.environ["HERMES_MAX_ITERATIONS"]
+    from hermes_cli.iteration_env import bridge_max_iterations
+    bridge_max_iterations(agent_cfg["max_turns"], source_home=source_home)
 
 
 def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:
@@ -2107,7 +2104,7 @@ def _bridge_config_to_env(_cfg: dict) -> None:
     # (e.g. HERMES_MAX_ITERATIONS=60 written by an old `hermes setup` run) silently shadow the user's
     # current config. See PR #18413 / the 60-vs-500 max_turns incident.
     _agent_cfg = _cfg.get("agent", {})
-    _bridge_max_turns_to_env(_agent_cfg)
+    _bridge_max_turns_to_env(_agent_cfg, source_home=_hermes_home)
     _bridge_section_to_env(_agent_cfg, _AGENT_ENV_BRIDGE)
     _bridge_section_to_env(_cfg.get("sessions", {}), _SESSIONS_ENV_BRIDGE)
     _display_cfg = _cfg.get("display", {})

@@ -496,6 +496,10 @@ def strip_launch_profile_env(env: dict, target_home: "str | Path | None" = None)
     # Authorization gates are the one residue a name list cannot see: a unit-file ``Environment=``
     # or an operator export never appears in the launch ``.env``, the secret scrub ignores
     # non-credentials, and the target's own ``.env`` rarely defines the key to overwrite it (#113270).
+    # A config-only iteration mirror never appears in the dotenv residue names.
+    # The routed-home guard above is essential: the launch profile keeps its budget.
+    from hermes_cli.iteration_env import strip_launch_iteration_env
+    strip_launch_iteration_env(env)
     return strip_profile_gate_env(env)
 
 
@@ -508,6 +512,13 @@ def restore_managed_env(env: dict) -> dict:
     for key in managed_dotenv_keys():
         if key in os.environ:
             env[key] = os.environ[key]
+    # A config bridge may have overwritten the ambient managed slot. Restore its
+    # actual policy after the target scope, without changing same-profile children.
+    from hermes_constants import get_hermes_home_override
+    target = get_hermes_home_override()
+    if target and _is_routed_home(target):
+        from hermes_cli.iteration_env import restore_managed_iteration_env
+        restore_managed_iteration_env(env)
     return env
 
 

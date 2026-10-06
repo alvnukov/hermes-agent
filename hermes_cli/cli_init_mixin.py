@@ -202,11 +202,23 @@ class CLIInitMixin:
         # resolve_turn_limit() accepts "none"/"unlimited" (-> sys.maxsize) alongside ints.
         # KEEP the root-level CLI_CONFIG["max_turns"] fallback: it is never migrated on disk
         # and other config paths may bypass the load-time fold.
-        from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-        self.max_turns = _resolve_turn_limit(next(
-            (v for v in (max_turns, CLI_CONFIG["agent"].get("max_turns"), CLI_CONFIG.get("max_turns")) if v is not None),
-            os.getenv("HERMES_MAX_ITERATIONS"),
-        ))
+        from hermes_cli.config import TURN_LIMIT_UNLIMITED, resolve_turn_limit as _resolve_turn_limit
+        from hermes_constants import get_hermes_home
+        env_limit = os.getenv("HERMES_MAX_ITERATIONS")
+        source, raw = next(
+            ((name, value) for name, value in (
+                ("CLI override", max_turns),
+                ("effective agent.max_turns (config/defaults)", CLI_CONFIG["agent"].get("max_turns")),
+                ("legacy root max_turns", CLI_CONFIG.get("max_turns")),
+            ) if value is not None),
+            ("environment (origin unspecified)" if env_limit is not None else "default", env_limit),
+        )
+        self.max_turns = _resolve_turn_limit(raw)
+        logger.info(
+            "Iteration budget resolved: profile_home=%s max_iterations=%s source=%s",
+            get_hermes_home(), "unlimited" if self.max_turns == TURN_LIMIT_UNLIMITED else self.max_turns,
+            source,
+        )
         self.run_budget_seconds = run_budget if run_budget is not None else CLI_CONFIG["agent"].get("run_budget_seconds")
 
     def _init_toolsets(self, toolsets):
