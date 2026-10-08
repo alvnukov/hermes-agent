@@ -167,6 +167,13 @@ TOOLSETS = {
         "files, and (for orchestrators) list, unblock, and fan out tasks.",
         [t for t in _HERMES_CORE_TOOLS if t.startswith("kanban_")],
     ),
+    "kanban_admin": _ts(
+        "Explicit profile opt-in for full Kanban board, card, worker, dispatch, attachment, "
+        "notification and orchestration management. Never granted to dispatcher workers or delegated children.",
+        ["kanban_tasks", "kanban_boards", "kanban_workers", "kanban_dispatch",
+         "kanban_attachment_manage", "kanban_notifications", "kanban_orchestration"],
+        includes=["kanban"],
+    ),
     "discord": _ts("Discord read and participate tools (fetch messages, search members, create threads)", ["discord"]),
     "discord_admin": _ts("Discord server management (list channels/roles, pin messages, assign roles)", ["discord_admin"]),
     "yuanbao": _ts("Yuanbao platform tools - group info, member queries, DM, stickers", _YUANBAO_TOOLS),

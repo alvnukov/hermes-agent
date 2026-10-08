@@ -29,6 +29,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from hermes_cli import kanban_db
+from hermes_cli.kanban_db_status import set_queue_status
 from hermes_cli.web_read_coalescing import coalesced_read
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_notify as kbn
@@ -601,7 +602,7 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
         return kanban_db.unblock_task(conn, task_id)
     if current is not None and current.status == "review":
         return kanban_db.reopen_review_task(conn, task_id)
-    return _set_status_direct(conn, task_id, s)
+    return set_queue_status(conn, task_id, s, actor="dashboard")
 
 
 # Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk: (conn, task_id,
@@ -799,59 +800,6 @@ def _parents_blocking_ready(conn: sqlite3.Connection, task_id: str) -> list:
         "WHERE l.child_id = ? AND t.status != 'done'",
         (task_id,)).fetchall()
     return [{"id": r["id"], "title": r["title"], "status": r["status"]} for r in rows]
-
-
-def _set_status_direct(conn: sqlite3.Connection, task_id: str, new_status: str) -> bool:
-    """Direct status write for drag-drop moves without a structured verb (todo<->ready,
-    running<->ready) + a ``status`` event. Leaving ``running`` closes the run as 'reclaimed'
-    so attempt history isn't orphaned; the worker is killed only AFTER the txn commits."""
-    terminations: list[tuple[Optional[int], Optional[str], Optional[int]]] = []
-    effective_status = new_status
-    with kanban_db.write_txn(conn):
-        prev = conn.execute(
-            "SELECT status, current_run_id, worker_pid, claim_lock, worker_started_at FROM tasks WHERE id = ?",
-            (task_id,)).fetchone()
-        if prev is None:
-            return False
-        if prev["status"] == "running" and new_status == "ready":
-            resume_status = kanban_db._retry_status_for_run(conn, task_id, prev["current_run_id"])
-            if resume_status == "review":
-                effective_status = "review" if kanban_db._parents_satisfied(conn, task_id) else "todo"
-        # Never promote to 'ready' unless all parents are done/archived — otherwise the
-        # dispatcher spawns a child whose upstream work hasn't completed.
-        if effective_status == "ready" and not kanban_db._parents_satisfied(conn, task_id):
-            return False
-        was_running = prev["status"] == "running"
-        reopening_satisfied_parent = prev["status"] in {"done", "archived"} and effective_status not in {"done", "archived"}
-        cur = conn.execute(
-            "UPDATE tasks SET status = ?, "
-            "  claim_lock = CASE WHEN ? = 'running' THEN claim_lock ELSE NULL END, "
-            "  claim_expires = CASE WHEN ? = 'running' THEN claim_expires ELSE NULL END, "
-            "  worker_pid = CASE WHEN ? = 'running' THEN worker_pid ELSE NULL END "
-            "WHERE id = ?",
-            (effective_status,) * 4 + (task_id,))
-        if cur.rowcount != 1:
-            return False
-        run_id = None
-        if was_running and effective_status != "running" and prev["current_run_id"]:
-            run_id = kanban_db._end_run(
-                conn, task_id, outcome="reclaimed", status="reclaimed",
-                summary=f"status changed to {effective_status} (dashboard/direct)")
-            terminations.append((prev["worker_pid"], prev["claim_lock"], prev["worker_started_at"]))
-        conn.execute(
-            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) VALUES (?, ?, 'status', ?, ?)",
-            (task_id, run_id, json.dumps({"status": effective_status, "requested_status": new_status}), int(time.time())))
-        if reopening_satisfied_parent:
-            # Domain-layer invalidation composes via a savepoint inside our txn and hands
-            # back worker terminations to perform post-commit.
-            result = kanban_db.invalidate_descendants_for_parent_reopen(conn, task_id, author="dashboard")
-            terminations.extend(result["terminations"])
-    for pid, claim_lock, started_at in terminations:
-        kanban_db._terminate_reclaimed_worker(pid, claim_lock, started_at=started_at)
-    # Re-opening something may have made children stale.
-    if effective_status in {"done", "ready", "review"}:
-        kanban_db.recompute_ready(conn)
-    return True
 
 
 # --- Comments / links -------------------------------------------------------

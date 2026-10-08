@@ -77,6 +77,7 @@ def add_notify_sub(
     notifier_profile: Optional[str] = None,
     delivery_mode: Optional[str] = None,
     delivery_metadata: Optional[Mapping[str, Any]] = None,
+    expected_notifier_profile: Optional[str] = None,
 ) -> None:
     """Register a gateway source wanting terminal-state notifications for
     ``task_id``; idempotent on (task, platform, chat, thread).
@@ -99,9 +100,11 @@ def add_notify_sub(
     key = _sub_key(task_id, platform, chat_id, thread_id)
     with _kb.write_txn(conn):
         existing = conn.execute(
-            "SELECT delivery_metadata FROM kanban_notify_subs " + _SUB_KEY_WHERE,
+            "SELECT delivery_metadata, notifier_profile FROM kanban_notify_subs " + _SUB_KEY_WHERE,
             key,
         ).fetchone()
+        if expected_notifier_profile is not None and existing is not None and existing["notifier_profile"] != expected_notifier_profile:
+            raise ValueError("subscription belongs to another profile")
         existing_metadata = _decode_notify_delivery_metadata(existing["delivery_metadata"]) if existing else {}
         merged_metadata = dict(existing_metadata)
         if delivery_metadata:
@@ -259,11 +262,14 @@ def remove_notify_sub(
     platform: str,
     chat_id: str,
     thread_id: Optional[str] = None,
+    expected_notifier_profile: Optional[str] = None,
 ) -> bool:
     with _kb.write_txn(conn):
+        owner_where = " AND notifier_profile = ?" if expected_notifier_profile is not None else ""
+        owner_params = (expected_notifier_profile,) if expected_notifier_profile is not None else ()
         cur = conn.execute(
-            "DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE,
-            _sub_key(task_id, platform, chat_id, thread_id),
+            "DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE + owner_where,
+            (*_sub_key(task_id, platform, chat_id, thread_id), *owner_params),
         )
     return cur.rowcount > 0
 

@@ -59,8 +59,10 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
     byte-level probes of the file are refused because an ``open()``/``close()``
     would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
     from hermes_cli.sqlite_safe_read import connect_tracked
+    from hermes_cli.kanban_db_control import board_file_identity
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
+    before = board_file_identity(path)
     conn = connect_tracked(
         path,
         connect_fn=sqlite3.connect,
@@ -68,6 +70,10 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
         timeout=busy_timeout_ms / 1000.0,
     )
     try:
+        identity = board_file_identity(path)
+        if identity is None or (before is not None and before != identity):
+            raise sqlite3.OperationalError("Kanban storage changed while opening the connection")
+        setattr(conn, "_hermes_kanban_file_identity", identity)
         # Explicit PRAGMA (besides connect(timeout=)) so it is observable and
         # survives wrapper changes; PRAGMA assignments can't bind parameters.
         conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")

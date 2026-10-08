@@ -503,6 +503,48 @@ saved; `all` alone is not a Kanban opt-in.
 Dispatcher-owned workers receive their task lifecycle tools automatically.
 `delegate_task` children do not gain permission to mutate the board.
 
+### Full management for selected profiles
+
+Enable `kanban_admin` for profiles that should administer the whole board:
+
+```bash
+hermes -p planner tools enable kanban_admin
+hermes -p planner tools enable kanban_admin --platform telegram
+hermes -p planner tools disable kanban_admin --platform telegram
+```
+
+This default-off toolset includes the existing `kanban` lifecycle tools and
+seven management tools:
+
+| Tool | Operations |
+| --- | --- |
+| `kanban_tasks` | Edit, assign/reassign, move, promote, reopen review, archive/delete, unlink dependencies, model/reasoning overrides, specify and decompose |
+| `kanban_boards` | List/show/stats, create/update, switch, archive/delete, export/import |
+| `kanban_workers` | Active workers, run history/details, bounded logs, reclaim and terminate |
+| `kanban_dispatch` | One dispatcher tick, with an optional dry run and spawn cap |
+| `kanban_attachment_manage` | Inspect or delete an attachment |
+| `kanban_notifications` | List, subscribe or unsubscribe notifications owned by the calling profile |
+| `kanban_orchestration` | Read/update profile Kanban settings and dispatch limits |
+
+Each management call requires both a saved grant in the active profile and an
+explicit `kanban_admin` session selection. `all` does not grant administration;
+`agent.disabled_toolsets` overrides the grant. The CLI, dashboard and Desktop
+tool checkboxes use the same saved selection. Start a new conversation after
+enabling it; existing conversations retain their schemas.
+
+Dispatcher workers and delegated children never receive management access, even
+if their execution profile enables it for ordinary chats. Management tools also
+check authorization when invoked, so guessing a hidden tool name cannot bypass
+the selection. They use the same dependency, review, goal and worker-claim rules
+as the existing lifecycle tools. An active worker's card is archived before
+deletion; a board with active claims must be reclaimed before removal.
+
+`kanban_tasks(action="decompose", children=[...])` accepts an explicit child
+graph with zero-based parent indices. Omitting `children`, or using `specify`,
+calls the configured auxiliary model. Unknown fields and invalid types are
+rejected before mutations. Orchestration updates preserve unrelated config;
+gateway dispatcher settings require its configuration to be reloaded/restarted.
+
 ## How workers interact with the board
 
 **Workers do not shell out to `hermes kanban`.** When the dispatcher spawns a worker it sets `HERMES_KANBAN_TASK=t_abcd` in the child's env, and that env var flips on a dedicated **kanban toolset** in the model's schema. The same toolset is also available to orchestrator profiles that enable `kanban` in their toolsets config. These tools read and mutate the board directly via the Python `kanban_db` layer, same as the CLI does. A running worker calls these like any other tool; it never sees or needs the `hermes kanban` CLI.

@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from typing import Iterable, Iterator, Optional
 
 _requested: ContextVar[Optional[bool]] = ContextVar("kanban_toolset_requested", default=None)
+_admin_requested: ContextVar[Optional[bool]] = ContextVar("kanban_admin_requested", default=None)
 
 
 def kanban_toolset_requested() -> Optional[bool]:
@@ -18,11 +19,19 @@ def kanban_toolset_requested() -> Optional[bool]:
     return _requested.get()
 
 
+def kanban_admin_requested() -> Optional[bool]:
+    """Explicit management selection, independent of worker lifecycle access."""
+    return _admin_requested.get()
+
+
 @contextmanager
 def scoped_kanban_toolset_selection(toolsets: Optional[Iterable[str]]) -> Iterator[None]:
     """An all/default selection is not an explicit workflow opt-in."""
-    token = _requested.set("kanban" in (toolsets or ()))
+    selected = frozenset(toolsets or ())
+    token = _requested.set(bool(selected & {"kanban", "kanban_admin"}))
+    admin_token = _admin_requested.set("kanban_admin" in selected)
     try:
         yield
     finally:
+        _admin_requested.reset(admin_token)
         _requested.reset(token)
