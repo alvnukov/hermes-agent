@@ -8,6 +8,7 @@ it('settles a card-chat send after an external worker accepts the note without s
   let state = { ...createClientSessionState('worker-chat'), busy: true, awaitingResponse: true }
   const busyRef = { current: true }
   const scope = { setBusy: vi.fn(), setAwaitingResponse: vi.fn() }
+
   const updateSessionState = vi.fn((_id: string, update: (current: typeof state) => typeof state) => {
     state = update(state)
 
@@ -32,11 +33,12 @@ it('keeps the normal streaming turn active after submit acceptance', () => {
   const scope = { setBusy: vi.fn(), setAwaitingResponse: vi.fn() }
   const busyRef = { current: true }
 
-  submit.applySubmitAcknowledgement(
-    { sessionId: 'card-view', result: { status: 'streaming' } },
-    'note',
-    { busyRef, scope, targetIsCurrentView: () => true, updateSessionState }
-  )
+  submit.applySubmitAcknowledgement({ sessionId: 'card-view', result: { status: 'streaming' } }, 'note', {
+    busyRef,
+    scope,
+    targetIsCurrentView: () => true,
+    updateSessionState
+  })
 
   expect(updateSessionState).not.toHaveBeenCalled()
   expect(scope.setBusy).not.toHaveBeenCalled()

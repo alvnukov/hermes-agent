@@ -1,9 +1,9 @@
-import { zhProviders } from './zh_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale } from './define-locale'
 import { introZh } from './intro-zh'
 import { zhModelMenu } from './zh_model_menu'
+import { zhProviders } from './zh_providers'
 
 export const zh = defineLocale({
   externalOpenFailed: {

@@ -1,8 +1,8 @@
-import { ruProviders } from './ru_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale } from './define-locale'
 import { ruModelMenu } from './ru_model_menu'
+import { ruProviders } from './ru_providers'
 
 // RU_PLURAL: (count, one, few, many) — русские формы сущ. падежа
 // RU_NOUN: (count, one, few, many) — формы род. множественного

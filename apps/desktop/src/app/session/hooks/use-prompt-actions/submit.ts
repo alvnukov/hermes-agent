@@ -146,7 +146,12 @@ export function rebindPaneToResumedRuntime({
 export function applySubmitAcknowledgement(
   submitted: { result: PromptSubmitResult; sessionId: string },
   optimisticId: string,
-  { busyRef, scope, targetIsCurrentView, updateSessionState }: {
+  {
+    busyRef,
+    scope,
+    targetIsCurrentView,
+    updateSessionState
+  }: {
     busyRef: SubmitPromptDeps['busyRef']
     scope: Pick<NonNullable<SubmitPromptDeps['scope']>, 'setAwaitingResponse' | 'setBusy'>
     targetIsCurrentView: () => boolean
@@ -173,8 +178,12 @@ export function applySubmitAcknowledgement(
 
   if (submitted.result?.worker_note_accepted) {
     updateSessionState(submitted.sessionId, state => ({
-      ...state, busy: false, awaitingResponse: false, turnStartedAt: null
+      ...state,
+      busy: false,
+      awaitingResponse: false,
+      turnStartedAt: null
     }))
+
     if (targetIsCurrentView()) {
       setMutableRef(busyRef, false)
       scope.setBusy(false)
@@ -1005,7 +1014,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             { alsoTimeout: true }
           )
 
-          applySubmitAcknowledgement(submitted, optimisticId, { busyRef, scope, targetIsCurrentView, updateSessionState })
+          applySubmitAcknowledgement(submitted, optimisticId, {
+            busyRef,
+            scope,
+            targetIsCurrentView,
+            updateSessionState
+          })
           acceptedRuntimeSessionId = submitted.sessionId
         } catch (firstErr) {
           if (firstErr instanceof SessionRecoveryAborted) {

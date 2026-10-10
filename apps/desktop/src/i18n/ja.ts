@@ -1,9 +1,9 @@
-import { jaProviders } from './ja_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale } from './define-locale'
 import { introJa } from './intro-ja'
 import { jaModelMenu } from './ja_model_menu'
+import { jaProviders } from './ja_providers'
 
 export const ja = defineLocale({
   externalOpenFailed: {

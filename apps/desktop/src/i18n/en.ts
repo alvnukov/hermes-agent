@@ -1,7 +1,7 @@
-import { enProviders } from './en_providers'
 import { FIELD_DESCRIPTIONS, FIELD_LABELS } from '@/app/settings/constants'
 
 import { enModelMenu } from './en_model_menu'
+import { enProviders } from './en_providers'
 import type { Translations } from './types'
 
 export const en: Translations = {

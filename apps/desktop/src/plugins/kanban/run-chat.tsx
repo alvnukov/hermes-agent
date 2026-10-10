@@ -41,7 +41,9 @@ export function RunChatButton({
           : null
 
   async function open() {
-    if (!routedToScope({ queryKey: taskKey(scope, slug, taskId) })) {return}
+    if (!routedToScope({ queryKey: taskKey(scope, slug, taskId) })) {
+      return
+    }
     setPending(true)
 
     try {
@@ -49,7 +51,9 @@ export function RunChatButton({
       // *bound* run: a new unbound attempt must not navigate to an old worker.
       const target = run === undefined ? ((await fetchTask(taskId)).runs.at(-1) ?? null) : run
 
-      if ((host.activeConnectionId() ?? 'local') !== scope || $boardSlug.get() !== slug) {return}
+      if ((host.activeConnectionId() ?? 'local') !== scope || $boardSlug.get() !== slug) {
+        return
+      }
       const sessionId = workerSessionId(target)
       const profile = target?.profile?.trim()
 

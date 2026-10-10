@@ -1,8 +1,8 @@
-import { esProviders } from './es_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { esModelMenu } from './es_model_menu'
+import { esProviders } from './es_providers'
 import { introEs } from './intro-es'
 
 export const esOverrides = {

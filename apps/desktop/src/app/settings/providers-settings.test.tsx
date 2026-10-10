@@ -855,11 +855,18 @@ describe('OAuth account API routing', () => {
     const work = screen.getByRole('listitem', { name: 'Work' })
     const checkbox = within(personal).getByRole('checkbox', { name: 'Codex Guardian (experimental)' })
     expect(checkbox.getAttribute('data-state')).toBe('unchecked')
-    expect(within(work).getByRole('checkbox', { name: 'Codex Guardian (experimental)' }).getAttribute('data-state')).toBe('checked')
+    expect(
+      within(work).getByRole('checkbox', { name: 'Codex Guardian (experimental)' }).getAttribute('data-state')
+    ).toBe('checked')
     fireEvent.click(checkbox)
-    await waitFor(() => expect(updateOAuthAccount).toHaveBeenCalledWith(
-      'openai-codex', 'first', { guardian_enabled: true }, expect.objectContaining({ profile: 'alpha', connectionId: 'connection-a' })
-    ))
+    await waitFor(() =>
+      expect(updateOAuthAccount).toHaveBeenCalledWith(
+        'openai-codex',
+        'first',
+        { guardian_enabled: true },
+        expect.objectContaining({ profile: 'alpha', connectionId: 'connection-a' })
+      )
+    )
   })
 
   it('pins every account request to the connection and profile that served its list', async () => {

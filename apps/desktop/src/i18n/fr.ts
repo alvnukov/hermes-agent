@@ -1,8 +1,8 @@
-import { frProviders } from './fr_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { frModelMenu } from './fr_model_menu'
+import { frProviders } from './fr_providers'
 import { introFr } from './intro-fr'
 
 export const frOverrides = {

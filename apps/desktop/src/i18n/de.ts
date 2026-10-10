@@ -1,7 +1,7 @@
-import { deProviders } from './de_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { deModelMenu } from './de_model_menu'
+import { deProviders } from './de_providers'
 import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introDe } from './intro-de'
 
