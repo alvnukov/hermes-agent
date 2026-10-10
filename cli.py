@@ -925,6 +925,7 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
             return True
         try:
             from hermes_cli.active_sessions import format_refusal_stderr, try_acquire_active_session
+            from hermes_cli.kanban_chat import cli_session_metadata
 
             lease, message = try_acquire_active_session(
                 session_id=self.session_id,
@@ -932,7 +933,7 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
                 config=self.config,
                 # Writer identity: a re-claim by this process replaces its own entry.
                 # See #94595.
-                metadata={"live_session_id": str(self.session_id)},
+                metadata=cli_session_metadata(self.session_id),
             )
         except Exception as exc:
             logger.warning("Failed to claim active session slot: %s", exc)

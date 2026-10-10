@@ -2649,6 +2649,7 @@ export interface PromptSubmitResult {
   status?: PromptSubmitStatus | null
   voice_stopped?: boolean | null
   user_row_id?: number | null
+  worker_note_accepted?: boolean | null
   survivor_user_row_ids?: (number | null)[] | null
   survivor_row_id_map?: Record<string, number | null> | null
   turn_isolation?: boolean | null

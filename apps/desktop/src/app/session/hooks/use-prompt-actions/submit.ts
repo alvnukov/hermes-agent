@@ -143,6 +143,46 @@ export function rebindPaneToResumedRuntime({
 }
 
 /** The prompt submit pipeline, extracted from usePromptActions. */
+export function applySubmitAcknowledgement(
+  submitted: { result: PromptSubmitResult; sessionId: string },
+  optimisticId: string,
+  { busyRef, scope, targetIsCurrentView, updateSessionState }: {
+    busyRef: SubmitPromptDeps['busyRef']
+    scope: Pick<NonNullable<SubmitPromptDeps['scope']>, 'setAwaitingResponse' | 'setBusy'>
+    targetIsCurrentView: () => boolean
+    updateSessionState: SubmitPromptDeps['updateSessionState']
+  }
+): void {
+  const rowId = submitted.result?.user_row_id
+
+  if (typeof rowId === 'number' && Number.isSafeInteger(rowId) && rowId > 0) {
+    // Bind only this send's optimistic occurrence, even if its turn already finished.
+    updateSessionState(submitted.sessionId, state => {
+      const index = state.messages.findIndex(message => message.id === optimisticId && message.role === 'user')
+
+      if (index < 0 || state.messages[index].rowId === rowId) {
+        return state
+      }
+
+      return {
+        ...state,
+        messages: state.messages.map((message, i) => (i === index ? { ...message, rowId } : message))
+      }
+    })
+  }
+
+  if (submitted.result?.worker_note_accepted) {
+    updateSessionState(submitted.sessionId, state => ({
+      ...state, busy: false, awaitingResponse: false, turnStartedAt: null
+    }))
+    if (targetIsCurrentView()) {
+      setMutableRef(busyRef, false)
+      scope.setBusy(false)
+      scope.setAwaitingResponse(false)
+    }
+  }
+}
+
 export function useSubmitPrompt(deps: SubmitPromptDeps) {
   const {
     activeSessionIdRef,
@@ -965,26 +1005,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             { alsoTimeout: true }
           )
 
-          const rowId = submitted.result?.user_row_id
-
-          if (typeof rowId === 'number' && Number.isSafeInteger(rowId) && rowId > 0) {
-            // The worker may finish before this acknowledgement arrives. Bind
-            // only this send's optimistic occurrence; never reset live state or
-            // assume the newest user row still belongs to this RPC.
-            updateSessionState(submitted.sessionId, state => {
-              const index = state.messages.findIndex(message => message.id === optimisticId && message.role === 'user')
-
-              if (index < 0 || state.messages[index].rowId === rowId) {
-                return state
-              }
-
-              return {
-                ...state,
-                messages: state.messages.map((message, i) => (i === index ? { ...message, rowId } : message))
-              }
-            })
-          }
-
+          applySubmitAcknowledgement(submitted, optimisticId, { busyRef, scope, targetIsCurrentView, updateSessionState })
           acceptedRuntimeSessionId = submitted.sessionId
         } catch (firstErr) {
           if (firstErr instanceof SessionRecoveryAborted) {

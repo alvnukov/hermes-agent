@@ -678,6 +678,33 @@ def _lock_in_submit_turn(
 _CLIENT_SURFACES = frozenset({"hud", "voice-live"})
 
 
+def _worker_compression_tip(session, anchor):
+    with _session_db(session) as db:
+        if db is None:
+            raise RuntimeError("Worker session lineage is unavailable")
+        return db.get_compression_tip(anchor)
+
+
+def _submit_session_admission(rid, sid, session, text, params):
+    from hermes_cli.active_sessions import SESSION_NOT_OWNED, session_already_owned_message
+    from hermes_cli.kanban_chat import submit_worker_note, worker_chat_owner
+
+    try:
+        owner = worker_chat_owner(session, lambda anchor: _worker_compression_tip(session, anchor))
+        if owner is not None:
+            if submit_worker_note(session, text, params, owner):
+                return _ok(rid, {"status": "steered", "worker_note_accepted": True})
+            return _err(rid, 4090, session_already_owned_message(owner["session_id"], owner),
+                        {"reason": SESSION_NOT_OWNED})
+    except Exception:
+        logger.warning("Kanban worker note admission failed for %s", sid, exc_info=True)
+        return _err(rid, 4090, "Hermes could not safely reserve this session. Try again.")
+    if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
+        reason = getattr(limit_message, "reason", None)
+        return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None)
+    return None
+
+
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     from hermes_cli.input_sanitize import sanitize_user_prompt_text
@@ -717,11 +744,10 @@ def _(rid, params: dict) -> dict:
         if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
     if err is not None:
         return err
-    if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
+    if (admission := _submit_session_admission(rid, sid, session, text, params)) is not None:
         # Refused HERE — before the busy queue, db row and agent build — so a refusal
         # leaves the session untouched.  The reason travels as machine-readable data.
-        reason = getattr(limit_message, "reason", None)
-        return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None)
+        return admission
     # Rewritten every submit: a session alternates app window / HUD / live voice; a stale value misinforms.
     session["client_surface"] = params.get("surface") if params.get("surface") in _CLIENT_SURFACES else ""
     # Live-voice delegations carry the recent spoken transcript for the MODEL INPUT only (the persisted

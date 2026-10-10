@@ -26421,6 +26421,18 @@
             "default": null,
             "title": "User Row Id"
           },
+          "worker_note_accepted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Worker Note Accepted"
+          },
           "survivor_user_row_ids": {
             "anyOf": [
               {

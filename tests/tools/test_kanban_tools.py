@@ -681,6 +681,72 @@ def test_worker_the_dispatcher_never_recorded_keeps_its_claim_or_never_starts(mo
         assert kb.get_task(conn, late).worker_pid is None
 
 
+def test_worker_session_is_linked_while_running_and_survives_block(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    assert kt.register_current_worker_from_env(session_id="worker-chat") is True
+    with kbc.connect_closing() as conn:
+        run = kb.latest_run(conn, worker_env)
+        assert run.status == "running"
+        assert run.metadata["worker_session_id"] == "worker-chat"
+        assert kb.block_task(conn, worker_env, reason="needs discussion", expected_run_id=run.id)
+        assert kb.get_run(conn, run.id).metadata["worker_session_id"] == "worker-chat"
+
+
+def test_reclaimed_worker_cannot_link_its_session_to_a_new_run(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    with kbc.connect_closing() as conn:
+        old_run = kb.latest_run(conn, worker_env)
+        assert kb.block_task(conn, worker_env, reason="retry", expected_run_id=old_run.id)
+        assert kb.unblock_task(conn, worker_env)
+        assert kb.claim_task(conn, worker_env)
+        new_run = kb.latest_run(conn, worker_env)
+    assert kt.register_current_worker_from_env(session_id="stale-chat") is False
+    with kbc.connect_closing() as conn:
+        assert not (kb.get_run(conn, new_run.id).metadata or {}).get("worker_session_id")
+
+
+def test_worker_session_binding_keeps_the_first_lineage_anchor(worker_env):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    assert kt.register_current_worker_from_env(session_id="first-chat")
+    assert kt.register_current_worker_from_env(session_id="compressed-chat")
+    with kbc.connect_closing() as conn:
+        assert kb.latest_run(conn, worker_env).metadata["worker_session_id"] == "first-chat"
+
+
+def test_worker_persists_session_before_linking_the_chat(worker_env, tmp_path):
+    from hermes_state import SessionDB
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from tools import kanban_tools as kt
+
+    database = SessionDB(db_path=tmp_path / "state.db")
+
+    class Worker:
+        session_id = "persisted-worker-chat"
+        _session_db_created = False
+
+        def _ensure_db_session(self):
+            database.create_session(session_id=self.session_id, source="kanban")
+            self._session_db_created = True
+
+    try:
+        assert kt.register_current_worker_from_env(agent=Worker())
+        assert database.get_session("persisted-worker-chat")["source"] == "kanban"
+        with kbc.connect_closing() as conn:
+            assert kb.latest_run(conn, worker_env).metadata["worker_session_id"] == "persisted-worker-chat"
+    finally:
+        database.close()
+
+
 def test_reclaim_loses_to_a_worker_registering_mid_sweep(monkeypatch, worker_env):
     """The worker registers between the stale-claim SELECT and its UPDATE: the claim stays its own."""
     import os as _os
