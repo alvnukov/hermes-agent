@@ -2286,17 +2286,6 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
     return api_messages
 
 
-def _managed_summary_call(agent, api_request_id: str, request, callback, *, retry_count: int):
-    from agent import relay_llm
-    return relay_llm.execute_current(
-        request, callback,
-        name=str(getattr(agent, "provider", "") or "provider"), model_name=str(getattr(agent, "model", "") or ""),
-        metadata={"api_mode": str(getattr(agent, "api_mode", "") or "chat_completions"),
-            "api_request_id": api_request_id, "call_role": "iteration_summary", "retry_count": retry_count},
-        defer_logical_completion=True,
-    )
-
-
 def _summary_text(agent, response, **normalize_kwargs) -> str:
     if is_router_timeout_shim(response):
         # Router failure in a 200 envelope (#68396): an empty summary takes the retry slot.
@@ -2326,19 +2315,23 @@ def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
 
 
 def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
+    from agent.chat_completion_summary import managed_summary_call
+
     def _attempt(retry_count: int) -> str:
         ant_kw = agent._get_transport().build_kwargs(
             model=agent.model, messages=api_messages, tools=None, max_tokens=agent.max_tokens,
             reasoning_config=agent.reasoning_config, is_oauth=agent._is_anthropic_oauth,
             preserve_dots=agent._anthropic_preserve_dots(), base_url=getattr(agent, "_anthropic_base_url", None))
         ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw)
-        response = _managed_summary_call(
+        response = managed_summary_call(
             agent, api_request_id, ant_kw, agent._interruptible_api_call, retry_count=retry_count)
         return _summary_text(agent, response, strip_tool_prefix=agent._is_anthropic_oauth)
     return _attempt
 
 
 def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
+    from agent.chat_completion_summary import managed_summary_call
+
     # Same kwargs builder as the main loop so the summary keeps the cached prefix (tools,
     # prompt_cache_key, xAI alias, Moonshot sanitization). Do not omit tools or force
     # tool_choice="none" here: SGLang renders the prompt with tools=None in that mode and the KV
@@ -2351,7 +2344,7 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
     def _attempt(retry_count: int) -> str:
         # Use the ordinary request-local lifecycle: a summary can be interrupted
         # during a long prefill without closing the shared primary client.
-        response = _managed_summary_call(
+        response = managed_summary_call(
             agent, api_request_id, summary_kwargs, agent._interruptible_api_call,
             retry_count=retry_count)
         return _summary_text(agent, response)

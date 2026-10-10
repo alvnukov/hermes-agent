@@ -4281,14 +4281,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         from agent.conversation_compression import _raise_if_stale_attempt
 
         _raise_if_stale_attempt(self)
-        # Only a genuine no-provider RuntimeError gets the long cooldown; empty/invalid-response
-        # RuntimeErrors are transient and must get the main-model retry below first.
-        # ``call_llm`` raises ``RuntimeError`` for two very different cases: 1. 2. An empty/invalid response
-        # from a configured provider (``_validate_llm_response`` empty-``choices``/``None``, or our
-        # empty-``content`` guard above) — a transient/proxy fault that should fall back to the main model
-        # first, exactly like the transport errors handled below. Only (1) belongs in the long no-provider
-        # cooldown; (2) and every other exception flow into the generic fallback logic so they get a
-        # main-model retry before any cooldown. (#11978, #11914)
+        # Only a genuine no-provider RuntimeError gets the long cooldown. Empty or invalid
+        # responses are transient faults and must retry the main model first (#11978, #11914).
         if isinstance(e, RuntimeError) and "no llm provider configured" in str(e).lower():
             self._record_compression_failure_cooldown(_SUMMARY_FAILURE_COOLDOWN_SECONDS, "no auxiliary LLM provider configured")
             self._last_summary_error = "no auxiliary LLM provider configured"
