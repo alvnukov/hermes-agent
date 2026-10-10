@@ -172,8 +172,9 @@ _CARD_SUMMARY_PREVIEW_CHARS = 200
 
 
 def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None,
-               current_run_started_at: Optional[int] = None) -> dict[str, Any]:
+               current_run_started_at: Optional[int] = None, display_status: Optional[str] = None) -> dict[str, Any]:
     d = asdict(task)
+    d["display_status"] = display_status or task.status
     # Derived age metrics so the UI can colour stale cards without client deltas.
     try:
         d["age"] = kanban_db.task_age(task)
@@ -185,6 +186,24 @@ def _task_dict(task: kanban_db.Task, *, latest_summary: Optional[str] = None,
     # start; after a retry the run clock must tick from the fresh run).
     d["current_run_started_at"] = current_run_started_at
     return d
+
+
+def _display_statuses(conn: sqlite3.Connection, tasks: list[kanban_db.Task]) -> dict[str, str]:
+    """Presentation only: a running reviewer stays in Review; older claims do not count."""
+    statuses = {task.id: task.status for task in tasks}
+    running = [task.id for task in tasks if task.status == "running" and task.current_run_id is not None]
+    if not running:
+        return statuses
+    rows = conn.execute(
+        "SELECT t.id, e.payload FROM tasks t JOIN task_events e "
+        "ON e.task_id = t.id AND e.run_id = t.current_run_id "
+        f"WHERE t.id IN ({_placeholders(running)}) AND e.kind = 'claimed' "
+        "AND e.id = (SELECT MAX(id) FROM task_events "
+        "WHERE task_id = t.id AND run_id = t.current_run_id AND kind = 'claimed')", running)
+    for row in rows:
+        if row["id"] in statuses and kanban_db._json_dict(row["payload"]).get("source_status") == "review":
+            statuses[row["id"]] = "review"
+    return statuses
 
 
 def _attachment_dict(a: kanban_db.Attachment) -> dict[str, Any]:
@@ -316,15 +335,16 @@ def get_board(
         # One query for the active run's start per card (avoids N+1); the run
         # clock ticks from this, not the task's first-ever start.
         run_start_map = kanban_db.current_run_started_ats(conn, [t.id for t in tasks])
+        display_statuses = _display_statuses(conn, tasks)
         for t in tasks:
             full = summary_map.get(t.id)
             d = _task_dict(t, latest_summary=(full[:_CARD_SUMMARY_PREVIEW_CHARS] if full else None),
-                           current_run_started_at=run_start_map.get(t.id))
+                           current_run_started_at=run_start_map.get(t.id), display_status=display_statuses[t.id])
             d["link_counts"] = link_counts.get(t.id, {"parents": 0, "children": 0})
             d["comment_count"] = comment_counts.get(t.id, 0)
             d["progress"] = progress.get(t.id)  # None when the task has no children
             _attach_diagnostics(d, diagnostics_per_task.get(t.id))
-            columns[t.status if t.status in columns else "todo"].append(d)
+            columns[d["display_status"] if d["display_status"] in columns else "todo"].append(d)
 
         # Queue lanes keep the list_tasks dispatch order; the done column is
         # history, so order it newest-completed-first. Two stable sorts compose
@@ -379,7 +399,8 @@ def get_task(
         # Drawer returns the FULL summary (cards on /board carry a 200-char preview).
         task_d = _task_dict(
             task, latest_summary=kanban_db.latest_summary(conn, task_id),
-            current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id))
+            current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id),
+            display_status=_display_statuses(conn, [task])[task_id])
         links = _links_for(conn, task_id)
         child_summaries = kanban_db.latest_summaries(conn, links["children"])
         children = filter(None, (kanban_db.get_task(conn, cid) for cid in links["children"]))
@@ -520,6 +541,7 @@ def remove_attachment(attachment_id: int, board: Optional[str] = Query(None)):
 
 class UpdateTaskBody(BaseModel):
     status: Optional[str] = None
+    expected_run_id: Optional[int] = Field(None, gt=0)
     assignee: Optional[str] = None
     priority: Optional[int] = None
     title: Optional[str] = None
@@ -542,6 +564,7 @@ class UpdateTaskBody(BaseModel):
 class BulkTaskBody(BaseModel):
     ids: list[str]
     status: Optional[str] = None
+    expected_run_ids: dict[str, int] = Field(default_factory=dict)
     assignee: Optional[str] = None  # "" or None = unassign
     priority: Optional[int] = None
     archive: bool = False
@@ -584,9 +607,35 @@ def _drag_to(conn, task_id: str, s: str) -> bool:
 # Status verb dispatch shared by PATCH /tasks/{id} and POST /tasks/bulk: (conn, task_id,
 # payload) -> ok. ``review`` uses request_review (never a block, so it can't trip unblock-loop
 # detection) and ``done`` pass ``force=True``: a dashboard action is a human override of a live worker claim.
+def _terminate_closed_review_run(conn, task_id: str, run_id: int) -> None:
+    # Registration is fenced by the live claim; the closed run retains its final fingerprint.
+    worker = conn.execute(
+        "SELECT worker_pid, claim_lock, worker_started_at FROM task_runs WHERE task_id = ? AND id = ? AND ended_at IS NOT NULL",
+        (task_id, run_id)).fetchone()
+    if worker is not None:
+        kanban_db._terminate_reclaimed_worker(worker["worker_pid"], worker["claim_lock"], started_at=worker["worker_started_at"])
+
+
+def _complete_from_dashboard(conn, task_id: str, payload) -> bool:
+    task = kanban_db.get_task(conn, task_id)
+    expected_run_id = getattr(payload, "expected_run_id", None) or getattr(payload, "expected_run_ids", {}).get(task_id)
+    if expected_run_id is not None and (task is None or task.current_run_id != expected_run_id):
+        return False
+    review_run = task is not None and task.status == "running" and kanban_db._retry_status_for_run(conn, task_id, task.current_run_id) == "review"
+    run_id = task.current_run_id if task is not None and review_run else expected_run_id
+    summary = payload.summary
+    if review_run and not summary and not payload.result:
+        summary = kanban_db._REVIEW_APPROVED_NOTE
+    ok = kanban_db.complete_task(
+        conn, task_id, result=payload.result, summary=summary, metadata=payload.metadata, force=True,
+        expected_run_id=run_id)
+    if ok and review_run and run_id is not None:
+        _terminate_closed_review_run(conn, task_id, run_id)
+    return ok
+
+
 _STATUS_HANDLERS: dict[str, Any] = {
-    "done": lambda conn, tid, p: kanban_db.complete_task(
-        conn, tid, result=p.result, summary=p.summary, metadata=p.metadata, force=True),
+    "done": _complete_from_dashboard,
     "blocked": lambda conn, tid, p: kanban_db.block_task(conn, tid, reason=getattr(p, "block_reason", None)),
     "scheduled": lambda conn, tid, p: kanban_db.schedule_task(conn, tid, reason=getattr(p, "block_reason", None)),
     "review": lambda conn, tid, p: kanban_db.request_review(
@@ -705,8 +754,28 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
             _patch_title_body(conn, task_id, payload, board)
         updated = kanban_db.get_task(conn, task_id)
         return {"task": _task_dict(
-            updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id)
+            updated, current_run_started_at=kanban_db.current_run_started_ats(conn, [task_id]).get(task_id),
+            display_status=_display_statuses(conn, [updated])[task_id]
         ) if updated else None}
+
+
+class RequestChangesBody(BaseModel):
+    reason: str = Field(min_length=1)
+    expected_run_id: int = Field(gt=0)
+
+
+@router.post("/tasks/{task_id}/request-changes")
+def request_changes(task_id: str, payload: RequestChangesBody, board: Optional[str] = Query(None)):
+    with _board_conn(board) as (board, conn):
+        _require_task(conn, task_id)
+        ok, detail = kanban_db.request_changes(
+            conn, task_id, reason=payload.reason, expected_run_id=payload.expected_run_id)
+        if not ok:
+            raise _conflict(detail or "review handoff refused")
+        # Human handoff closes the claim before stopping its worker, just like reclaim.
+        _terminate_closed_review_run(conn, task_id, payload.expected_run_id)
+        updated = _require_task(conn, task_id)
+        return {"task": _task_dict(updated)}
 
 
 @router.delete("/tasks/{task_id}")

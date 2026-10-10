@@ -26,6 +26,24 @@ afterEach(() => {
 // #99819: a retried task's first start is hours old while the fresh run is
 // minutes old — the clock must tick from the current run, not task.started_at.
 describe('RunClock', () => {
+  it('shows compact activity for an active review', () => {
+    const now = Math.floor(Date.now() / 1000)
+
+    render(
+      <RunClock
+        task={{
+          id: 'review',
+          title: 'Review',
+          status: 'running',
+          display_status: 'review',
+          current_run_started_at: now - 90
+        }}
+      />
+    )
+
+    expect(screen.getByText('working · 1m')).toBeTruthy()
+  })
+
   it('ticks from the current run start instead of the task first start', () => {
     const now = Math.floor(Date.now() / 1000)
 

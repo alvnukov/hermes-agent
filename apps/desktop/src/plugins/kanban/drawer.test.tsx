@@ -88,10 +88,74 @@ afterEach(() => {
 function openDrawer() {
   return render(
     <QueryClientProvider client={client}>
-      <TaskDrawer columns={['todo', 'ready', 'done']} id="t_example" onClose={vi.fn()} onOpen={vi.fn()} />
+      <TaskDrawer
+        columns={['todo', 'ready', 'running', 'review', 'done']}
+        id="t_example"
+        onClose={vi.fn()}
+        onOpen={vi.fn()}
+      />
     </QueryClientProvider>
   )
 }
+
+describe('current review phase', () => {
+  it('shows Review and reviewer activity while the internal task is running', async () => {
+    detail = {
+      ...legacyDetail,
+      task: {
+        ...legacyDetail.task,
+        status: 'running',
+        display_status: 'review',
+        current_run_id: 7,
+        current_run_started_at: Date.now() / 1000 - 90
+      }
+    }
+    openDrawer()
+    expect(await screen.findByRole('button', { name: 'Review' })).toBeTruthy()
+    expect(screen.getByText('working · 1m')).toBeTruthy()
+  })
+
+  it('offers manual review and distinct review actions, and submits the changes reason for the current run', async () => {
+    detail = { ...legacyDetail }
+    openDrawer()
+    fireEvent.keyDown(await screen.findByRole('button', { name: 'Todo' }), { key: 'ArrowDown' })
+    expect(await screen.findByRole('menuitem', { name: 'Review' })).toBeTruthy()
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' })
+
+    detail = {
+      ...legacyDetail,
+      task: { ...legacyDetail.task, status: 'running', display_status: 'review', current_run_id: 7 }
+    }
+    await act(async () => client.invalidateQueries({ queryKey: taskKey('local', '', 't_example') }))
+    fireEvent.keyDown(await screen.findByRole('button', { name: 'Review' }), { key: 'ArrowDown' })
+    expect(await screen.findByRole('menuitem', { name: 'Restart review' })).toBeTruthy()
+    expect(screen.getByRole('menuitem', { name: 'Approve review' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Return for changes' }))
+    const reason = await screen.findByRole('textbox', { name: 'Reason for changes' })
+    fireEvent.change(reason, { target: { value: 'Fix the result' } })
+    rest.mockImplementationOnce(async (path, options) => {
+      if (path.includes('/request-changes') && options?.method === 'POST') {
+        detail = {
+          ...legacyDetail,
+          task: { ...legacyDetail.task, status: 'ready', display_status: 'ready', assignee: 'builder' }
+        }
+
+        return { task: (detail as KanbanTaskDetail).task }
+      }
+
+      throw new Error(`Unexpected request: ${path}`)
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Return for changes' }))
+    await waitFor(() =>
+      expect(rest).toHaveBeenCalledWith(
+        '/tasks/t_example/request-changes',
+        expect.objectContaining({ body: { reason: 'Fix the result', expected_run_id: 7 } })
+      )
+    )
+    expect(await screen.findByRole('button', { name: 'Ready' })).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: 'Reason for changes' })).toBeNull()
+  })
+})
 
 describe('task attachment compatibility', () => {
   it('downloads the persisted attachment through its original remote owner', async () => {

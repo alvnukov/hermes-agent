@@ -86,7 +86,15 @@ import { TaskDrawer } from './drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
 import { OrchestrationPanel } from './orchestration'
 import { RunChatButton } from './run-chat'
-import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
+import {
+  columnMeta,
+  displayStatus,
+  isActiveReview,
+  type KanbanBoard,
+  type KanbanTask,
+  previewTransition,
+  type TaskEstimate
+} from './types'
 import {
   $newTaskLane,
   ago,
@@ -102,6 +110,7 @@ import {
   PriorityGlyph,
   RunClock,
   shortId,
+  statusActionLabel,
   useDefaultAssignee,
   useKanban,
   useOrchestration
@@ -119,7 +128,7 @@ function moveCard(board: KanbanBoard, id: string, toStatus: string): KanbanBoard
         return true
       }
 
-      moved = { ...task, status: toStatus }
+      moved = previewTransition(task, toStatus)
 
       return false
     })
@@ -131,7 +140,7 @@ function moveCard(board: KanbanBoard, id: string, toStatus: string): KanbanBoard
 
   return {
     ...board,
-    columns: columns.map(col => (col.name === toStatus ? { ...col, tasks: [moved!, ...col.tasks] } : col))
+    columns: columns.map(col => (col.name === displayStatus(moved!) ? { ...col, tasks: [moved!, ...col.tasks] } : col))
   }
 }
 
@@ -165,7 +174,7 @@ function CardFooter({ arc, task }: { arc: ArcState | null; task: KanbanTask }) {
   // auto-default (ready), else the specifier that rewrites triage cards.
   const attached = task.assignee || (task.status === 'ready' ? fallback : task.status === 'triage' ? orchestrator : '')
 
-  const meta = columnMeta(task.status)
+  const meta = columnMeta(displayStatus(task))
 
   return (
     <div className="flex items-center gap-2 whitespace-nowrap text-[0.625rem] text-(--ui-text-tertiary)">
@@ -267,7 +276,7 @@ function Card({
 }) {
   const k = useKanban()
   const [dragging, setDragging] = useState(false)
-  const meta = columnMeta(task.status)
+  const meta = columnMeta(displayStatus(task))
   const summary = task.latest_summary || task.body
   const fallback = useDefaultAssignee()
   const arc = arcState(task, fallback)
@@ -328,11 +337,13 @@ function Card({
         </ContextMenuItem>
         <ContextMenuSeparator />
         {columns
-          .filter(name => name !== task.status && !isLockedTarget(name))
+          .filter(name => name !== displayStatus(task) && !isLockedTarget(name))
           .map(name => (
             <ContextMenuItem key={name} onSelect={() => onMove(task.id, name)}>
               <span className="size-2 rounded-full" style={{ backgroundColor: columnMeta(name).tone }} />
-              {k.moveTo(columnLabel(k, name))}
+              {displayStatus(task) === 'review' && (name === 'ready' || name === 'done')
+                ? statusActionLabel(k, task, name)
+                : k.moveTo(columnLabel(k, name))}
             </ContextMenuItem>
           ))}
         <ContextMenuSeparator />
@@ -970,14 +981,25 @@ function SelectionBar({
   columns,
   onClear,
   onDone,
-  selected
+  selected,
+  tasks
 }: {
   columns: string[]
   onClear: () => void
   onDone: (failed: string[]) => void
   selected: ReadonlySet<string>
+  tasks: KanbanTask[]
 }) {
   const k = useKanban()
+  const selectedTasks = tasks.filter(task => selected.has(task.id))
+
+  // Ready means three different operations; mixed selections cannot honestly name it.
+  const readyKinds = new Set(
+    selectedTasks.map(task =>
+      isActiveReview(task) ? 'restart' : displayStatus(task) === 'review' ? 'changes' : 'ready'
+    )
+  )
+
   const qc = useQueryClient()
   const scope = useKanbanScope()
   const { data: roster } = useQuery({ queryKey: profilesKey(scope), queryFn: fetchProfiles, staleTime: 60_000 })
@@ -1036,11 +1058,25 @@ function SelectionBar({
           </DropdownMenuTrigger>
           <DropdownMenuContent align="center">
             {columns
-              .filter(name => !isLockedTarget(name))
+              .filter(name => !isLockedTarget(name) && (name !== 'ready' || readyKinds.size <= 1))
               .map(name => (
-                <DropdownMenuItem key={name} onSelect={() => bulk.mutate({ status: name })}>
+                <DropdownMenuItem
+                  key={name}
+                  onSelect={() =>
+                    bulk.mutate({
+                      status: name,
+                      expected_run_ids: Object.fromEntries(
+                        selectedTasks
+                          .filter(task => task.current_run_id != null)
+                          .map(task => [task.id, task.current_run_id])
+                      )
+                    })
+                  }
+                >
                   <span className="size-2 rounded-full" style={{ backgroundColor: columnMeta(name).tone }} />
-                  {columnLabel(k, name)}
+                  {selectedTasks.length && selectedTasks.every(task => displayStatus(task) === 'review')
+                    ? statusActionLabel(k, selectedTasks[0], name)
+                    : columnLabel(k, name)}
                 </DropdownMenuItem>
               ))}
           </DropdownMenuContent>
@@ -1203,7 +1239,8 @@ export function KanbanBoardPage() {
   const total = filtered?.columns.reduce((sum, col) => sum + col.tasks.length, 0) ?? 0
 
   const moveMut = useMutation({
-    mutationFn: ({ id, status }: { id: string; status: string }) => patchTask(id, { status }),
+    mutationFn: ({ id, status, runId }: { id: string; status: string; runId?: null | number }) =>
+      patchTask(id, { status, expected_run_id: runId }),
     onMutate: async ({ id, status }) => {
       await qc.cancelQueries({ queryKey: boardKey(scope, slug, archived) })
       const previous = qc.getQueryData<KanbanBoard>(boardKey(scope, slug, archived))
@@ -1252,7 +1289,7 @@ export function KanbanBoardPage() {
   const onMove = (id: string, status: string) => {
     const task = board?.columns.flatMap(col => col.tasks).find(candidate => candidate.id === id)
 
-    if (!task || task.status === status) {
+    if (!task || displayStatus(task) === status) {
       return
     }
 
@@ -1262,7 +1299,7 @@ export function KanbanBoardPage() {
       return
     }
 
-    moveMut.mutate({ id, status })
+    moveMut.mutate({ id, status, runId: status === 'done' ? task.current_run_id : undefined })
   }
 
   const errorMessage = error ? errText(error) : null
@@ -1438,6 +1475,7 @@ export function KanbanBoardPage() {
           onClear={() => setSelected(new Set())}
           onDone={failed => setSelected(new Set(failed))}
           selected={selected}
+          tasks={board?.columns.flatMap(column => column.tasks) ?? []}
         />
       )}
 

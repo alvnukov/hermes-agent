@@ -2,12 +2,15 @@
  *  (`plugins/kanban/dashboard/plugin_api.py`) returns much more per task; we
  *  type only what the UI reads so a schema addition never breaks the build. */
 
-/** One card. `status` is the column id (see COLUMN_META). */
+/** One card. Worker status and presentation phase are deliberately separate. */
 export interface KanbanTask {
   id: string
   title: string
   body?: null | string
   status: string
+  /** Additive dashboard field; older backends omit it. */
+  display_status?: string
+  current_run_id?: null | number
   assignee?: null | string
   priority?: number
   tenant?: null | string
@@ -34,6 +37,24 @@ export interface KanbanTask {
   /** Unblock-loop counter — how many times this task re-blocked for the same
    *  reason after a human unblock. 0/absent on legacy payloads. */
   block_recurrences?: number
+}
+
+export const displayStatus = (task: KanbanTask): string => task.display_status ?? task.status
+export const isActiveReview = (task: KanbanTask): boolean =>
+  task.status === 'running' && displayStatus(task) === 'review'
+
+/** Ready restarts an active reviewer, but reopens a queued review for its author. */
+export function previewTransition(task: KanbanTask, target: string): KanbanTask {
+  const status = target === 'ready' && isActiveReview(task) ? 'review' : target
+
+  return {
+    ...task,
+    status,
+    display_status: status,
+    current_run_id: null,
+    current_run_started_at: null,
+    worker_pid: null
+  }
 }
 
 export interface KanbanColumn {

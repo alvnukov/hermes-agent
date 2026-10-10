@@ -464,6 +464,9 @@ export const reassignTask = (id: string, profile: string) =>
 
 export const reclaimTask = (id: string) => nudged(call(withBoard(`/tasks/${id}/reclaim`), { method: 'POST', body: {} }))
 
+export const requestChanges = (id: string, reason: string, runId: number) =>
+  nudged(call(withBoard(`/tasks/${id}/request-changes`), { method: 'POST', body: { reason, expected_run_id: runId } }))
+
 export const uploadAttachment = (id: string, upload: { filename: string; contentType?: string; bytes: ArrayBuffer }) =>
   call(withBoard(`/tasks/${id}/attachments`), { method: 'POST', upload })
 

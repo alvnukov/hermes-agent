@@ -18,8 +18,8 @@ import {
 import { type ReactNode, useEffect, useState } from 'react'
 
 import { fetchOrchestration, orchestrationKey, useKanbanScope } from './api'
-import { columnLabel, useKanban } from './i18n'
-import { columnMeta, type KanbanTask } from './types'
+import { columnLabel, type KanbanText, useKanban } from './i18n'
+import { columnMeta, displayStatus, isActiveReview, type KanbanTask } from './types'
 
 // Plugin-scoped i18n lives in ./i18n; re-exported so components import strings
 // and chrome from one place (./ui).
@@ -46,13 +46,27 @@ export function useDefaultAssignee(): string {
 }
 
 // System-owned drop targets — you can drag a card OUT of these, never INTO
-// them, so lanes/menus must not offer them as targets. `running`/`review` are
+// them, so lanes/menus must not offer them as targets. `running` is
 // claimed by the dispatcher; `scheduled` needs a wake-up time only an agent or
 // the CLI can attach (a bare status drag is refused with a 409). The reason
 // copy lives in the plugin i18n bundle (`locked.*`); see `lockedReason`.
-export const LOCKED_COLUMNS = ['review', 'running', 'scheduled'] as const
+export const LOCKED_COLUMNS = ['running', 'scheduled'] as const
 
 export const isLockedTarget = (name: string): boolean => (LOCKED_COLUMNS as readonly string[]).includes(name)
+
+export function statusActionLabel(k: KanbanText, task: KanbanTask, target: string): string {
+  if (displayStatus(task) === 'review') {
+    if (target === 'ready') {
+      return isActiveReview(task) ? k.restartReview : k.requestChanges
+    }
+
+    if (target === 'done') {
+      return k.approveReview
+    }
+  }
+
+  return columnLabel(k, target)
+}
 
 export const shortId = (id?: null | string) => (id ?? '').replace(/^t_/, '').slice(0, 6)
 
@@ -152,7 +166,7 @@ export function RunClock({ task }: { task: KanbanTask }) {
   }
 
   return (
-    <span className="shrink-0 font-medium" style={{ color: columnMeta('running').tone }}>
+    <span className="shrink-0 font-medium" style={{ color: columnMeta(displayStatus(task)).tone }}>
       {k.working} · {elapsed}
     </span>
   )
@@ -194,11 +208,15 @@ export function Avatar({ name, size = '1.25rem' }: { name: string; size?: string
 export function StatusMenu({
   columns,
   onMove,
-  status
+  onRequestChanges,
+  status,
+  task
 }: {
   columns: string[]
   onMove: (status: string) => void
+  onRequestChanges?: () => void
   status: string
+  task?: KanbanTask
 }) {
   const k = useKanban()
   const meta = columnMeta(status)
@@ -222,10 +240,11 @@ export function StatusMenu({
           .map(name => (
             <DropdownMenuItem key={name} onSelect={() => onMove(name)}>
               <span className="size-2 rounded-full" style={{ backgroundColor: columnMeta(name).tone }} />
-              {columnLabel(k, name)}
+              {task ? statusActionLabel(k, task, name) : columnLabel(k, name)}
               {name === status && <Codicon className="ml-auto" name="check" size="0.8rem" />}
             </DropdownMenuItem>
           ))}
+        {onRequestChanges && <DropdownMenuItem onSelect={onRequestChanges}>{k.requestChanges}</DropdownMenuItem>}
       </DropdownMenuContent>
     </DropdownMenu>
   )

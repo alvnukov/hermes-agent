@@ -51,6 +51,7 @@ import {
   profilesKey,
   reassignTask,
   reclaimTask,
+  requestChanges,
   routedToScope,
   taskKey,
   uploadAttachment,
@@ -61,9 +62,13 @@ import { LatestRunChatButton, RunChatButton } from './run-chat'
 import {
   type Diagnostic,
   type DiagnosticAction,
+  displayStatus,
+  isActiveReview,
   type KanbanAttachment,
   type KanbanEvent,
+  type KanbanTask,
   type KanbanTaskDetail,
+  previewTransition,
   SEVERITY_TONE,
   type TaskEstimate,
   type WorkerLog
@@ -79,6 +84,7 @@ import {
   type KanbanText,
   lockedReason,
   PriorityGlyph,
+  RunClock,
   ScrollFade,
   Section,
   shortId,
@@ -834,6 +840,83 @@ function FeedTabs({
   )
 }
 
+function ReviewChanges({ task, onDone }: { task: KanbanTask; onDone: () => void }) {
+  const k = useKanban()
+  const [reason, setReason] = useState('')
+
+  const changes = useMutation({
+    mutationFn: () => requestChanges(task.id, reason.trim(), task.current_run_id!),
+    onError: err => host.notify({ kind: 'error', message: errText(err) }),
+    onSuccess: onDone
+  })
+
+  return (
+    <form
+      className="flex flex-col gap-2"
+      onSubmit={event => {
+        event.preventDefault()
+        changes.mutate()
+      }}
+    >
+      <Textarea
+        aria-label={k.changesReason}
+        autoFocus
+        onChange={event => setReason(event.target.value)}
+        placeholder={k.changesReason}
+        rows={2}
+        value={reason}
+      />
+      <Button disabled={!reason.trim() || changes.isPending} size="sm" type="submit">
+        {k.requestChanges}
+      </Button>
+    </form>
+  )
+}
+
+function TaskStatusControl({
+  columns,
+  id,
+  task,
+  onMove,
+  onRequestChanges
+}: {
+  columns: string[]
+  id: string
+  task?: KanbanTask
+  onMove: (status: string) => void
+  onRequestChanges: () => void
+}) {
+  if (!task) {
+    return <span className="font-mono text-sm text-(--ui-text-tertiary)">{shortId(id)}</span>
+  }
+
+  const reviewing = isActiveReview(task)
+
+  return (
+    <>
+      <StatusMenu
+        columns={columns}
+        onMove={onMove}
+        onRequestChanges={reviewing && task.current_run_id ? onRequestChanges : undefined}
+        status={displayStatus(task)}
+        task={task}
+      />
+      <span className="font-mono text-[0.625rem] text-(--ui-text-quaternary)" data-selectable-text="true">
+        {shortId(task.id)}
+      </span>
+      {reviewing && <RunClock task={task} />}
+    </>
+  )
+}
+
+function ReviewChangesPanel({ show, task, onDone }: { show: boolean; task?: KanbanTask; onDone: () => void }) {
+  if (!show || !task?.current_run_id || !isActiveReview(task)) {
+    return null
+  }
+
+  return <ReviewChanges key={`${task.id}:${task.current_run_id}`} onDone={onDone} task={task} />
+}
+
 export function TaskDrawer({
   columns,
   id,
@@ -860,6 +943,7 @@ export function TaskDrawer({
 
   const task = detail?.task
   const running = task?.status === 'running'
+  const [showReviewChanges, setShowReviewChanges] = useState(false)
   const defaultAssignee = useDefaultAssignee()
 
   const { data: log } = useQuery({
@@ -877,13 +961,14 @@ export function TaskDrawer({
   // Optimistic status change against the task cache; rolls back + toasts on a
   // rejected transition (the backend enforces the workflow).
   const moveMut = useMutation({
-    mutationFn: (status: string) => patchTask(id!, { status }),
-    onMutate: async status => {
+    mutationFn: ({ status, runId }: { status: string; runId?: null | number }) =>
+      patchTask(id!, { status, expected_run_id: runId }),
+    onMutate: async ({ status }) => {
       await qc.cancelQueries({ queryKey: taskKey(scope, slug, id!) })
       const previous = qc.getQueryData<KanbanTaskDetail>(taskKey(scope, slug, id!))
 
       if (previous) {
-        qc.setQueryData(taskKey(scope, slug, id!), { ...previous, task: { ...previous.task, status } })
+        qc.setQueryData(taskKey(scope, slug, id!), { ...previous, task: previewTransition(previous.task, status) })
       }
 
       return { previous }
@@ -950,7 +1035,7 @@ export function TaskDrawer({
   const linkTitles = new Map((detail?.link_tasks ?? []).map(linked => [linked.id, linked.title]))
 
   const move = (status: string) => {
-    if (!task || status === task.status) {
+    if (!task || status === displayStatus(task)) {
       return
     }
 
@@ -960,7 +1045,7 @@ export function TaskDrawer({
       return
     }
 
-    moveMut.mutate(status)
+    moveMut.mutate({ status, runId: status === 'done' ? task.current_run_id : undefined })
   }
 
   // The shared Dialog owns the chrome tokens, focus trap, Esc and outside-click
@@ -979,16 +1064,13 @@ export function TaskDrawer({
       >
         <header className="flex flex-col gap-2 px-5 pt-4 pb-3">
           <div className="flex items-center gap-2">
-            {task ? (
-              <StatusMenu columns={columns} onMove={move} status={task.status} />
-            ) : (
-              <span className="font-mono text-sm text-(--ui-text-tertiary)">{shortId(id)}</span>
-            )}
-            {task && (
-              <span className="font-mono text-[0.625rem] text-(--ui-text-quaternary)" data-selectable-text="true">
-                {shortId(task.id)}
-              </span>
-            )}
+            <TaskStatusControl
+              columns={columns}
+              id={id}
+              onMove={move}
+              onRequestChanges={() => setShowReviewChanges(true)}
+              task={task}
+            />
             <div className="ml-auto flex items-center gap-0.5">
               {task && (
                 <DropdownMenu>
@@ -1040,6 +1122,14 @@ export function TaskDrawer({
             {task ? task.title || task.id : shortId(id)}
           </DialogTitle>
           <LatestRunChatButton detail={detail} onOpened={onClose} />
+          <ReviewChangesPanel
+            onDone={() => {
+              setShowReviewChanges(false)
+              invalidate()
+            }}
+            show={showReviewChanges}
+            task={task}
+          />
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col" data-selectable-text="true">
