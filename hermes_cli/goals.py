@@ -899,6 +899,8 @@ def judge_goal(
     background_processes: Optional[List[Dict[str, Any]]] = None,
     contract: Optional[GoalContract] = None,
     active_delegations: int = 0,
+    evaluation_mode: str = "completion",
+    handoff_context: Optional[dict] = None,
 ) -> Tuple[str, str, bool, Optional[Dict[str, Any]], bool]:
     """Ask the auxiliary model whether the goal is satisfied.
 
@@ -906,6 +908,8 @@ def judge_goal(
     blocked / continue / wait / skipped. ``parse_failed`` means unusable output; transport errors
     set ``transport_failed`` instead and fail-open to ``continue``.
     """
+    if evaluation_mode not in ("completion", "review_readiness"):
+        raise ValueError("unknown goal evaluation mode")
     if not goal.strip():
         return "skipped", "empty goal", False, None, False
     if not last_response.strip():
@@ -930,7 +934,13 @@ def judge_goal(
         + (JUDGE_DELEGATIONS_BLOCK_TEMPLATE.format(count=active_delegations) if active_delegations > 0 else ""),
         current_time=safe_strftime(datetime.now(tz=timezone.utc).astimezone(), "%Y-%m-%d %H:%M:%S %Z"),
     )
-    if contract is not None and not contract.is_empty():
+    system_prompt = JUDGE_SYSTEM_PROMPT
+    if evaluation_mode == "review_readiness":
+        from hermes_cli.kanban_goal_gate import review_readiness_prompts
+        system_prompt, prompt = review_readiness_prompts(
+            goal, common["response"], handoff_context or {},
+        )
+    elif contract is not None and not contract.is_empty():
         contract_block = contract.render_block()
         if clean_subgoals:
             contract_block = f"{contract_block}\n{_render_extra_criteria(clean_subgoals)}"
@@ -942,7 +952,7 @@ def judge_goal(
         prompt = JUDGE_USER_PROMPT_TEMPLATE.format(**common)
 
     try:
-        raw = _call_goal_judge_llm(call_llm, JUDGE_SYSTEM_PROMPT, prompt, timeout)
+        raw = _call_goal_judge_llm(call_llm, system_prompt, prompt, timeout)
     except AuxiliaryClientUnavailable as exc:
         # No client at all (e.g. a dead Nous refresh token): name the cause so the user is sent to
         # re-authenticate, not to context-length / model debugging (#42177). Still fails open.

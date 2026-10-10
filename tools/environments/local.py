@@ -362,9 +362,10 @@ def build_subprocess_env(
     Under multiplex semantics it then overlays the bound secret scope (the routed profile's own
     ``.env`` + source values, which never enter ``os.environ``) and re-applies the managed keys,
     all BEFORE the scrub, so those values pass the same scrub / passthrough rules as any other."""
-    env: dict[str, str] = dict(base) if base is not None else os.environ.copy()
+    from hermes_cli.env_loader import snapshot_profile_env
+    env, profile_writes = (dict(base), {}) if base is not None else snapshot_profile_env()
     if strip_launch_profile:
-        strip_launch_profile_env(env)
+        strip_launch_profile_env(env, profile_writes=profile_writes)
         from agent.secret_scope import current_secret_scope, is_multiplex_active
         if is_multiplex_active():
             # Single-profile: the scope IS os.environ, so overlaying it would only re-sanitize
@@ -405,13 +406,16 @@ def served_profile_child_env(
     from agent.secret_scope import (
         UnscopedSecretError, build_profile_secret_scope, current_secret_scope, is_multiplex_active)
     from hermes_constants import apply_scratch_tmp_env, get_hermes_home_override
-    env = dict(base) if base is not None else hermes_subprocess_env(inherit_credentials=inherit_credentials)
+    from hermes_cli.env_loader import snapshot_profile_env
+    env, profile_writes = (dict(base), {}) if base is not None else snapshot_profile_env()
+    if base is None:
+        env = hermes_subprocess_env(base_env=env, inherit_credentials=inherit_credentials)
     target = str(target_home or get_hermes_home_override() or "")
     if target:
         env["HERMES_HOME"] = target
         apply_scratch_tmp_env(env)  # TMPDIR follows the served home, like HOME does
         if _is_routed_home(target):
-            strip_launch_profile_env(env, target)
+            strip_launch_profile_env(env, target, profile_writes=profile_writes)
             _scrub_credentials(env, inherit_credentials=False)
     if inherit_credentials:
         if target:
@@ -455,7 +459,10 @@ def _is_routed_home(target_home: "str | Path") -> bool:
         return True
 
 
-def strip_launch_profile_env(env: dict, target_home: "str | Path | None" = None) -> dict:
+def strip_launch_profile_env(
+    env: dict, target_home: "str | Path | None" = None, *,
+    profile_writes: "dict[str, tuple[str, str]] | None" = None,
+) -> dict:
     """Drop the LAUNCH profile's residue from a child env built for another served profile.
     ``os.environ`` holds the default profile's ``.env`` and its bridged ``TERMINAL_*`` settings;
     the secret scrub removes credentials but not settings (``HERMES_MODEL``, ``TERMINAL_ENV``,
@@ -484,13 +491,16 @@ def strip_launch_profile_env(env: dict, target_home: "str | Path | None" = None)
     # overlay puts back exactly the ones the target's own sources supply. The administrator-managed
     # .env is NOT residue: its values are policy for every profile (``_apply_managed_env`` applies
     # it last, with override, so it beats the user's own .env) — leave them in place.
-    from hermes_cli.env_loader import launch_dotenv_keys, managed_dotenv_keys, source_supplied_names
+    from hermes_cli.env_loader import (
+        launch_profile_env_keys, launch_dotenv_keys, managed_dotenv_keys, source_supplied_names)
     managed_names = {key.upper() for key in managed_dotenv_keys()}
     residue_names = {
         key.upper() for key in
         set(load_env_file(launch_home / ".env")) | set(launch_dotenv_keys())
         | set(TERMINAL_CONFIG_ENV_MAP.values()) | set(source_supplied_names())
-        if not _is_global_env(key.upper()) or key.upper().startswith("TERMINAL_")} - managed_names
+        if not _is_global_env(key.upper()) or key.upper().startswith("TERMINAL_")}
+    # A deployment env limit is global; a value written by A's config bridge is A's alone.
+    residue_names = (residue_names | set(launch_profile_env_keys(launch_home, env, profile_writes))) - managed_names
     for key in [k for k in env if k.upper() in residue_names]:
         del env[key]
     # Authorization gates are the one residue a name list cannot see: a unit-file ``Environment=``

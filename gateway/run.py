@@ -2008,10 +2008,8 @@ def _bridge_max_turns_to_env(agent_cfg: Any) -> None:
     if not isinstance(agent_cfg, dict) or "max_turns" not in agent_cfg:
         return
     raw = agent_cfg["max_turns"]
-    if raw is not None:
-        os.environ["HERMES_MAX_ITERATIONS"] = str(raw)
-    elif "HERMES_MAX_ITERATIONS" in os.environ:
-        del os.environ["HERMES_MAX_ITERATIONS"]
+    from hermes_cli.env_loader import publish_launch_config_env
+    publish_launch_config_env("HERMES_MAX_ITERATIONS", str(raw) if raw is not None else None)
 
 
 def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:

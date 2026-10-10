@@ -76,6 +76,40 @@ _DOTENV_PUBLISHED: dict[str, tuple[str | None, str, int]] = {}
 _DOTENV_PASSES = itertools.count()
 _DOTENV_LOCK = threading.RLock()
 
+# Budget mirrors and profile dotenv limits are residue; a deployment export is not.
+_PROFILE_ENV_WRITES: dict[str, tuple[str, str]] = {}
+
+
+def publish_launch_config_env(name: str, value: str | None) -> None:
+    """Publish a launch-profile config mirror, recording the write rather than inferring provenance."""
+    from hermes_constants import get_routing_process_hermes_home, hermes_home_key
+    home_key = hermes_home_key(get_routing_process_hermes_home())
+    with _DOTENV_LOCK:
+        if value is None:
+            os.environ.pop(name, None)
+            _PROFILE_ENV_WRITES.pop(name.upper(), None)
+        else:
+            os.environ[name] = value
+            _PROFILE_ENV_WRITES[name.upper()] = (home_key, value)
+
+
+def snapshot_profile_env() -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+    """Copy the process env and its known profile writes together, before a runtime refresh can race."""
+    with _DOTENV_LOCK:
+        return os.environ.copy(), dict(_PROFILE_ENV_WRITES)
+
+
+def launch_profile_env_keys(
+    home: Path, env: dict[str, str], writes: dict[str, tuple[str, str]] | None = None,
+) -> frozenset[str]:
+    """Owned names in a child snapshot; an explicit empty write map means unknown/custom provenance."""
+    from hermes_constants import hermes_home_key
+    home_key = hermes_home_key(home)
+    with _DOTENV_LOCK:
+        known = _PROFILE_ENV_WRITES if writes is None else writes
+        return frozenset(name.upper() for name, value in env.items()
+                         if known.get(name.upper()) == (home_key, value))
+
 # Per-process credentials a parent mints and injects into the child's environment (the Desktop shell /
 # a link-style launcher spawns `hermes dashboard` with a fresh HERMES_DASHBOARD_SESSION_TOKEN and keeps
 # the same token for its own /api probes). They are never .env configuration, so a persisted value in
@@ -374,6 +408,11 @@ def _load_dotenv_with_fallback(
             # Ours and untouched since → keep the original baseline; anything else is a newer outside value.
             baseline = record[0] if ours else current
             os.environ[name] = value
+            if name.upper() == "HERMES_MAX_ITERATIONS":
+                from hermes_constants import hermes_home_key
+                _PROFILE_ENV_WRITES.pop(name.upper(), None)
+                if not managed:
+                    _PROFILE_ENV_WRITES[name.upper()] = (hermes_home_key(path.parent), value)
             _DOTENV_PUBLISHED[name] = (baseline, value, load_pass)
     # Every key this file defines, for the launch-residue strip: dotenv never unsets, so a key later
     # removed from the launch .env stays in os.environ and a re-parse of the file no longer names it.

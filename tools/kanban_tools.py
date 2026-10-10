@@ -107,10 +107,11 @@ def _check_kanban_orchestrator_mode() -> bool:
 # Worker tools that terminate or transition a run's ownership. An unbound worker
 # (HERMES_KANBAN_RUN_ID unresolvable) must not run these: expected_run_id=None
 # would silently skip the run-ownership CAS in kanban_db. Non-lifecycle tools
-# (heartbeat / attach / attach_url) do not terminate a run and are not gated.
+# Attachments do not terminate a run. Heartbeat still requires run ownership
+# because extending a successor's lease is a lifecycle mutation.
 _RUN_LIFECYCLE_TOOLS = frozenset({
     "kanban_complete", "kanban_block", "kanban_schedule",
-    "kanban_request_review", "kanban_request_changes",
+    "kanban_request_review", "kanban_request_changes", "kanban_heartbeat",
 })
 
 class _Reject(Exception):
@@ -276,7 +277,7 @@ def _worker_guard(tool_name: str, args: dict) -> str:
     ``agent/kanban_stop.py``, which already treats an unbound run id as unknown
     and fails closed. CLI / human / orchestrator paths (no ``HERMES_KANBAN_TASK``)
     legitimately pass ``expected_run_id=None`` and are unaffected. Non-lifecycle
-    worker tools (heartbeat / attach / attach_url) do not terminate a run and are
+    worker tools (attach / attach_url) do not terminate a run and are
     not gated here.
     """
     _reject_delegated_child_mutation(tool_name)
@@ -483,37 +484,24 @@ _GOAL_GATE_MESSAGES = {
             "matching the card before requesting review.")}}
 
 
-def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
-    """Goal-mode pre-handoff judge gate: a worker must not complete / request
-    review before acceptance criteria are met. ``blocked`` gets its own
-    guidance; any other non-``done`` verdict gets the ``continue`` guidance.
-    A broken judge fails open (logged) so it cannot permanently wedge work."""
-    if not task or not task.goal_mode or not _goal_judge_available():
-        return
-    try:
-        # Headless gate runs outside any agent turn: bind the per-task relay-affinity scope
-        # (mirrors kanban_specify) so the relay does not reject the judge call (#113669).
-        from agent.portal_tags import get_affinity_scope, reset_affinity_scope, set_affinity_scope
-        affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{tid}")
-        try:
-            verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip())
-        finally:
-            if affinity_token is not None:
-                reset_affinity_scope(affinity_token)
-    except Exception as judge_exc:
-        logger.warning(
-            "goal judge check failed, allowing lifecycle handoff: %s", judge_exc, exc_info=True)
-        return
-    if transport_failed:
-        # ``judge_goal`` fails open to ``continue`` on transport errors (relay 400, auth, timeout);
-        # an unreachable judge is not a human "not done" and must not reject the handoff (#83610).
-        logger.warning("goal judge unreachable (%s), allowing lifecycle handoff", reason)
-        return
-    if verdict == "done":
-        return
-    key = "blocked" if verdict == "blocked" else "continue"
-    raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
+def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, conn=None,
+               reviewer=None, metadata=None):
+    """Evaluate the shared phase contract while preserving tool error formatting."""
+    from hermes_cli.kanban_goal_gate import evaluate_kanban_handoff
+    decision = evaluate_kanban_handoff(
+        conn, task, operation="request_review" if tool_name == "kanban_request_review" else "complete",
+        evidence=evidence, reviewer=reviewer, metadata=metadata,
+        judge=judge_goal, judge_available=_goal_judge_available(),
+    )
+    if not decision.allowed:
+        key = "blocked" if decision.verdict == "blocked" else "continue"
+        rejection_id = None
+        if conn is not None:
+            from hermes_cli.kanban_goal_gate import record_gate_rejection
+            rejection_id = record_gate_rejection(conn, tid, expected_run_id=_worker_run_id(tid), decision=decision)
+        reason = decision.reason + (f" (gate_rejection_event_id={rejection_id})" if rejection_id is not None else "")
+        raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
+    return decision
 
 
 # --- Runtime-activity → board bridges (auto-heartbeat, live comment injection) ---
@@ -573,11 +561,14 @@ def heartbeat_current_worker_from_env() -> bool:
         # stamping the window so a chatty child cannot starve the worker's own heartbeat.
         return False
     _auto_heartbeat_last_attempt = now
+    run_id = _worker_run_id(tid)
+    if run_id is None:
+        return False
     try:
         from hermes_cli import kanban_db_dispatch as kbd
         with _board(None, quiet_close=True) as (kb, conn):
-            ops = ((kb.heartbeat_claim, {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
-                   (kbd.heartbeat_worker, {"note": None, "expected_run_id": _worker_run_id(tid)}))
+            ops = ((kbd.heartbeat_current_run, {
+                "claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK"), "expected_run_id": run_id}),)
             succeeded = True
             for fn, kwargs in ops:
                 op = fn.__name__
@@ -829,13 +820,14 @@ def _handle_block(args: dict, **kw) -> str:
         # worker cannot resolve itself; `capability` and `transient` (or an unset kind) route back through
         # kanban_complete, which the judge now gates.
         task = kb.get_task(conn, tid)
-        _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
+        _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS and kind != "policy_gate"),
                f"goal_mode tasks can only block with kind in "
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
-        ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
-        _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
+        ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
+                           gate_rejection_event_id=args.get("gate_rejection_event_id"))
+        _check(ok, f"could not block {tid} (not running/ready, or policy_gate lacks fresh blockable native evidence)")
         landed_kind = kb.get_task(conn, tid).block_kind
         extra: dict = {"block_kind": landed_kind}
         if kind == "dependency" and landed_kind != kind:
@@ -888,20 +880,23 @@ def _handle_request_review(args: dict, **kw) -> str:
     metadata = _stamp_worker_session_metadata(tid, metadata)
     # Reviewer is model-supplied free text stored durably on the event payload.
     reviewer = _redact_opt(args.get("reviewer") or None)
-    if reviewer:
-        from hermes_cli.profiles import list_profile_names, profile_exists
-
-        # A non-profile reviewer would park the card in `review` on an assignee
-        # the dispatcher can never spawn (#106163).
-        _check(profile_exists(reviewer),
-               f"reviewer profile {reviewer!r} is not installed. "
-               f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
-        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
+        if reviewer is None:
+            reviewer = kb._prior_reviewer(conn, tid)
+        if reviewer:
+            from hermes_cli.profiles import list_profile_names, profile_exists
+            # Resolve history before the same profile check as an explicit reviewer.
+            _check(profile_exists(reviewer),
+                   f"reviewer profile {reviewer!r} is not installed. "
+                   f"Installed profiles: {', '.join(list_profile_names())}")
+        decision = _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary,
+                              conn=conn, reviewer=reviewer, metadata=metadata)
+        metadata = {**(metadata or {}), "_kanban_handoff": decision.context}
         try:
             ok, fail_reason = kb.request_review(
-                conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
-                expected_run_id=_worker_run_id(tid), with_reason=True)
+                conn, tid, summary=summary, metadata=metadata, reviewer=decision.context["selected_reviewer"],
+                expected_run_id=_worker_run_id(tid), with_reason=True,
+                expected_task_fingerprint=decision.task_fingerprint)
         except kb.ArtifactPreservationError as artifact_err:
             # Same contract as kanban_complete (#22923): the transition rolled
             # back, the task is untouched and retryable — say so explicitly or
@@ -939,9 +934,16 @@ def _handle_heartbeat(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         # The dispatcher pins HERMES_KANBAN_CLAIM_LOCK at spawn; the default
         # claimer covers locally-driven workers that bypassed the dispatcher.
-        kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
-        ok = kbd.heartbeat_worker(
-            conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
+        run_id = _worker_run_id(tid)
+        if run_id is not None:
+            ok = kbd.heartbeat_current_run(
+                conn, tid, note=args.get("note"), expected_run_id=run_id,
+                claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
+        else:
+            # Unbound operator/orchestrator compatibility; actual workers were
+            # refused by _worker_guard before reaching this route.
+            kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
+            ok = kbd.heartbeat_worker(conn, tid, note=args.get("note"))
         _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
         return _ok(task_id=tid)
 

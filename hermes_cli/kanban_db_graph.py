@@ -116,7 +116,7 @@ def decompose_triage_task(
     with write_txn(conn):
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path "
-            "FROM tasks WHERE id = ?", (task_id,),
+            "FROM tasks WHERE id = ? AND dispatch_hold IS NULL", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
             return None
@@ -131,6 +131,11 @@ def decompose_triage_task(
             _insert_decomposed_child(conn, task_id, root_row, child, author, now)
             for child in children
         ]
+        if not auto_promote:
+            from hermes_cli.kanban_db_holds import set_dispatch_hold
+            for cid in child_ids:
+                set_dispatch_hold(conn, cid, kind="manual_approval", cause_key=f"decomposition:{task_id}",
+                                  resume_status="ready", context={"root_task_id": task_id})
         # Sibling edges within the decomposed graph.
         for idx, child in enumerate(children):
             for p_idx in child.get("parents") or []:

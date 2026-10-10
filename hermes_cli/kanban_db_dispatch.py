@@ -25,6 +25,8 @@ from typing import Mapping
 from typing import Optional
 from typing import TYPE_CHECKING
 
+from hermes_cli.kanban_db_heartbeat import heartbeat_current_run, heartbeat_worker
+from hermes_cli import kanban_db_worker_logs as _worker_logs
 from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
 
 if TYPE_CHECKING:
@@ -262,16 +264,18 @@ _EXIT_TRAILER_RE = re.compile(
 )
 
 
+
+
 def _worker_log_exit_code(task_id: str, board: Optional[str] = None) -> Optional[int]:
     """Exit code from the trailer the worker CLI wrote to its own log; None when absent.
 
     The durable twin of ``_recent_worker_exits``: written by the worker itself
     (``hermes_cli.quiet_single_query.exit_single_query``), so it is there whether
     or not the process running this sweep ever reaped the worker. Last trailer
-    wins — the log is append-mode across re-runs.
+    wins within the current attempt — the log is append-mode across re-runs.
     """
     try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
+        raw = _worker_logs.current_worker_log_tail(task_id, board=board)
     except Exception:
         return None
     matches = _EXIT_TRAILER_RE.findall(raw or "")
@@ -605,44 +609,6 @@ def _defer_reclaim_for_live_worker(
         payload = {"reason": reason, "claim_lock": claim_lock, "claim_expires_now": grace}
         payload.update(termination)
         _kb._append_event(conn, task_id, "reclaim_deferred", payload, run_id=run_id)
-
-
-def heartbeat_worker(
-    conn: sqlite3.Connection,
-    task_id: str,
-    *,
-    note: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
-) -> bool:
-    """Record a ``heartbeat`` event + touch ``last_heartbeat_at``.
-
-    Liveness signal orthogonal to the PID check: a worker whose forked child
-    (train loop, crawl) is stuck can still have a live Python process.
-    Returns False if the task is not running or its claim expired.
-    """
-    now = int(time.time())
-    with _kb.write_txn(conn):
-        sql = "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ? AND status = 'running'"
-        params: tuple = (now, task_id)
-        if expected_run_id is not None:
-            sql += " AND current_run_id = ?"
-            params += (int(expected_run_id),)
-        cur = conn.execute(sql, params)
-        if cur.rowcount != 1:
-            return False
-        run_id = (
-            int(expected_run_id)
-            if expected_run_id is not None
-            else _kb._current_run_id(conn, task_id)
-        )
-        if run_id is not None:
-            conn.execute("UPDATE task_runs SET last_heartbeat_at = ? WHERE id = ?", (now, run_id))
-        _kb._append_event(
-            conn, task_id, "heartbeat",
-            {"note": note} if note else None,
-            run_id=run_id,
-        )
-    return True
 
 
 def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
@@ -1005,7 +971,7 @@ def _worker_final_output(task_id: str, board: Optional[str] = None) -> str:
     "current", so the log would silently not be found.
     """
     try:
-        raw = _kb.read_worker_log(task_id, tail_bytes=4000, board=board)
+        raw = _worker_logs.current_worker_log_tail(task_id, board=board)
     except Exception:
         return ""
     if not raw:
@@ -1544,11 +1510,13 @@ def check_respawn_guard(
     passes own those.
     """
     row = conn.execute(
-        "SELECT last_failure_error FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, dispatch_hold FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
         return None
+    if row["dispatch_hold"] is not None:
+        return "dispatch_hold"
 
     now = int(time.time())
 
@@ -1561,7 +1529,7 @@ def check_respawn_guard(
     latest_run = conn.execute(
         "SELECT outcome, ended_at, metadata FROM task_runs "
         "WHERE task_id = ? AND ended_at IS NOT NULL "
-        "ORDER BY ended_at DESC LIMIT 1",
+        "ORDER BY ended_at DESC, id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
@@ -1582,13 +1550,13 @@ def check_respawn_guard(
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
         return None
 
-    # 2. Quota / auth blocker: retrying immediately will not help.  A plain
-    # crash is different: its persisted error includes the worker's last
-    # captured output, which is context rather than a diagnosis and may contain
+    # 2. Quota / auth blocker: retrying immediately will not help.
+    # Successful review handoffs supersede old errors, including pre-fix rows.
+    # A crash's captured output is context rather than a diagnosis and may contain
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if err and latest_outcome not in ("crashed", "review_requested") and _RESPAWN_BLOCKER_RE.search(err):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
@@ -1764,7 +1732,7 @@ def dispatch_profile_allowlist_summary() -> str:
 def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
-        "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
+        "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL AND dispatch_hold IS NULL",
         (status,),
     ).fetchall()
     if not rows:
@@ -2202,6 +2170,9 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    from hermes_cli.kanban_db_holds import reconcile_policy_holds
+    from hermes_cli.kanban_goal_gate import gate_revisions
+    reconcile_policy_holds(conn, gate_revisions=gate_revisions())
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
@@ -2270,7 +2241,7 @@ def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:
     """Unclaimed rows of one lane in dispatch order."""
     return conn.execute(
         "SELECT id, assignee FROM tasks "
-        f"WHERE status = '{status}' AND claim_lock IS NULL "
+        f"WHERE status = '{status}' AND claim_lock IS NULL AND dispatch_hold IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
 
@@ -2457,36 +2428,6 @@ def worker_log_rotation_config(kanban_cfg: Optional[dict] = None) -> tuple[int, 
 
 def _rotated_log_path(log_path: Path, generation: int) -> Path:
     return log_path.with_suffix(log_path.suffix + f".{generation}")
-
-
-def _rotate_worker_log(
-    log_path: Path,
-    max_bytes: int,
-    backup_count: int = DEFAULT_LOG_BACKUP_COUNT,
-) -> None:
-    """Rotate ``<log>`` when it exceeds ``max_bytes``: ``<log>`` → ``<log>.1``,
-    older generations shift up to ``backup_count``.
-    """
-    try:
-        if not log_path.exists() or log_path.stat().st_size <= max_bytes:
-            return
-        backup_count = _positive_int(backup_count, DEFAULT_LOG_BACKUP_COUNT, minimum=0)
-        if backup_count == 0:
-            log_path.unlink()
-            return
-        oldest = _rotated_log_path(log_path, backup_count)
-        with contextlib.suppress(OSError):
-            if oldest.exists():
-                oldest.unlink()
-        for generation in range(backup_count - 1, 0, -1):
-            src = _rotated_log_path(log_path, generation)
-            if not src.exists():
-                continue
-            with contextlib.suppress(OSError):
-                src.rename(_rotated_log_path(log_path, generation + 1))
-        log_path.rename(_rotated_log_path(log_path, 1))
-    except OSError:
-        pass
 
 
 def _module_hermes_argv() -> list[str]:
@@ -2786,8 +2727,17 @@ def _open_worker_log(task: Task, board: Optional[str]):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{task.id}.log"
     rotate_bytes, backup_count = worker_log_rotation_config()
-    _rotate_worker_log(log_path, rotate_bytes, backup_count)
-    return open(log_path, "ab")
+    _worker_logs.rotate_worker_log(log_path, rotate_bytes, backup_count)
+    log_f = open(log_path, "ab")
+    try:
+        # Flush before Popen: an immediate startup failure may be the only text
+        # the child writes, and must not inherit the preceding worker's outcome.
+        log_f.write(f"\n{_worker_logs.WORKER_LOG_START}\n".encode())
+        log_f.flush()
+    except Exception:
+        log_f.close()
+        raise
+    return log_f
 
 
 def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
@@ -2864,7 +2814,10 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # on B's behalf (and raises under multiplex) — so bind B's secret scope around the build.
     with (_worker_profile_scope(profile_home, bind_home=False) if profile_home
           else contextlib.nullcontext()):
+        from hermes_cli.env_loader import snapshot_profile_env
+        base_env, profile_writes = snapshot_profile_env()
         env = build_subprocess_env(
+            base_env,
             scrub_secrets=is_multiplex_active() or routed,
             inherit_profile_home=True,
         )
@@ -2882,7 +2835,7 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         env["HERMES_HOME"] = profile_home
         # A multiplexer dispatching for another profile must not hand it the launch
         # profile's .env settings / TERMINAL_* policy — a standalone dispatcher never would.
-        strip_launch_profile_env(env, profile_home)
+        strip_launch_profile_env(env, profile_home, profile_writes=profile_writes)
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
@@ -2894,13 +2847,6 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # build_context_files_prompt; without it relative writes land in the gateway
     # user's home and workers load the gateway's AGENTS.md. file_tools rejects
     # relative / sentinel values, so only set a real absolute directory.
-    # Pin TERMINAL_CWD to the task's workspace so the worker's file tools and context-file loader anchor on
-    # the workspace, not whatever cwd the dispatching gateway happened to export. The worker subprocess is
-    # already launched with cwd=workspace, but TERMINAL_CWD takes precedence over the process cwd in both
-    # file_tools._resolve_base_dir (#41312 — relative write_file paths were landing in the gateway user's
-    # home) and build_context_files_prompt (#34619 — workers loaded the dispatching gateway's AGENTS.md
-    # instead of the task's). Setting it to the workspace fixes both: the workspace is where the task's work
-    # actually happens.
     if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
         env["TERMINAL_CWD"] = workspace
     if task.branch_name:
