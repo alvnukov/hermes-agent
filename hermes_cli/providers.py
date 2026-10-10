@@ -164,6 +164,8 @@ TRANSPORT_TO_API_MODE: Dict[str, str] = {
 def normalize_provider(name: str) -> str:
     """Resolve aliases and normalise casing to a canonical provider id."""
     key = name.strip().lower()
+    from hermes_cli.codex_account_routes import canonical_codex_provider
+    key = canonical_codex_provider(key)
     return ALIASES.get(key, key)
 
 
@@ -537,6 +539,10 @@ def resolve_provider_full(name: str, user_providers: Optional[Dict[str, Any]] = 
     managed llamacpp -> models.dev directly. User-defined ``providers.<name>`` is tried FIRST on
     the raw (pre-alias) name: a configured ``providers.openai`` pointing at api.openai.com must not
     be hijacked by the legacy "openai" -> "openrouter" alias."""
+    from hermes_cli.codex_account_routes import account_provider_def
+    account = account_provider_def(name)
+    if account is not None:
+        return account
     canonical = normalize_provider(name)
     raw = name.strip().lower()
     if user_providers:

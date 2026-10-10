@@ -1,3 +1,4 @@
+import { frProviders } from './fr_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale, type TranslationOverrides } from './define-locale'
@@ -2593,36 +2594,7 @@ export const frOverrides = {
         }
       }
     },
-    providers: {
-      connectAccount: 'Connecter un compte',
-      haveApiKey: 'Vous avez une clé API ?',
-      intro:
-        "Connectez-vous avec un abonnement — pas de clé API à copier. Hermes lance la connexion navigateur pour vous, directement dans l'application.",
-      connected: 'Connecté',
-      collapse: 'Réduire',
-      connectAnother: 'Connecter un autre fournisseur',
-      otherProviders: 'Autres fournisseurs',
-      disconnect: 'Déconnecter',
-      disconnectInTerminal: 'Déconnecter (exécute la commande de suppression dans le terminal)',
-      removeConfirm: provider => `Supprimer ${provider} ?`,
-      removeExternalGeneric: provider => `${provider} est géré par sa propre CLI — supprimez-le là-bas.`,
-      removeKeyManaged: provider => `${provider} est configuré depuis une clé API. Supprimez-le depuis les clés API.`,
-      removeTerminalConfirm: (provider, command) =>
-        `Déconnecter ${provider} ? Cela exécute « ${command} » dans le terminal pour effacer l'identifiant.`,
-      removeTerminalRunning: provider => `Exécution de la déconnexion ${provider} dans le terminal…`,
-      removedTitle: 'Compte supprimé',
-      removedMessage: provider => `${provider} a été supprimé.`,
-      failedRemove: provider => `Impossible de supprimer ${provider}`,
-      noProviderKeys: 'Aucune clé API de fournisseur disponible.',
-      searchKeys: 'Rechercher des fournisseurs…',
-      noKeysMatch: 'Aucun fournisseur ne correspond à votre recherche.',
-      localEndpoint: {
-        title: 'Point de terminaison local / personnalisé',
-        description:
-          "Pointez Hermes vers n'importe quel point de terminaison compatible OpenAI (Zyphra, vLLM, llama.cpp, Ollama, etc)."
-      },
-      loading: 'Chargement des fournisseurs...'
-    },
+    providers: frProviders,
     sessions: {
       loading: 'Chargement des sessions archivées…',
       archivedTitle: 'Sessions archivées',

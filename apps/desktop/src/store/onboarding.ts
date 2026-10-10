@@ -76,6 +76,7 @@ export interface DesktopOnboardingState {
    *  even when configured === true, and adds a close affordance. */
   manual: boolean
   targetScope?: OnboardingScope
+  addAccountProvider?: string
   /** True when the overlay was opened specifically to configure a local /
    *  custom OpenAI-compatible endpoint (e.g. from Settings → Model's "Set up
    *  custom endpoint"). Forces the API-key form with the local option
@@ -620,6 +621,7 @@ export function startManualOnboarding(
   providersRefreshPromise = null
   patch({
     manual: true,
+    addAccountProvider: undefined,
     targetScope: captureOnboardingScope(profile),
     providers: null,
     requested: true,
@@ -663,9 +665,10 @@ export function startManualLocalEndpoint(reason: null | string = null, profile?:
 // overlay render and never needs to persist or re-render anything itself.
 let pendingProviderOAuthId: null | string = null
 
-export function startManualProviderOAuth(providerId: string, profile?: ProfileScope) {
+export function startManualProviderOAuth(providerId: string, profile?: ProfileScope, addAccount = false) {
   pendingProviderOAuthId = providerId
   startManualOnboarding(null, profile)
+  patch({ addAccountProvider: addAccount ? providerId : undefined })
 }
 
 // Read the pending provider id without clearing it. The overlay only clears it
@@ -690,6 +693,7 @@ export function closeManualOnboarding() {
 
   patch({
     targetScope: undefined,
+    addAccountProvider: undefined,
     manual: false,
     requested: false,
     localEndpoint: false,
@@ -895,6 +899,7 @@ async function openSignInUrl(url: string) {
 export async function startProviderOAuth(provider: OAuthProvider, ctx: OnboardingContext) {
   ctx = captureContext(ctx)
   const generation = flowGeneration
+  const addAccount = $desktopOnboarding.get().addAccountProvider === provider.id
   flowScope = ctx.scope
   clearPoll()
 
@@ -907,7 +912,7 @@ export async function startProviderOAuth(provider: OAuthProvider, ctx: Onboardin
   setFlow({ status: 'starting', provider })
 
   try {
-    const start = await startOAuthLogin(provider.id, ctx.scope)
+    const start = await startOAuthLogin(provider.id, ctx.scope, addAccount)
 
     if (generation !== flowGeneration) {
       void cancelOAuthSession(start.session_id, ctx.scope).catch(() => undefined)
@@ -939,7 +944,7 @@ export async function startProviderOAuth(provider: OAuthProvider, ctx: Onboardin
         message: translateNow('onboarding.signInExpired')
       })
     )
-    pollTimer = window.setInterval(() => void pollSession(provider, start, ctx, generation), POLL_MS)
+    pollTimer = window.setInterval(() => void pollSession(provider, start, ctx, generation, addAccount), POLL_MS)
   } catch (error) {
     if (generation !== flowGeneration) {
       return
@@ -950,7 +955,13 @@ export async function startProviderOAuth(provider: OAuthProvider, ctx: Onboardin
 }
 
 // Poll a session-backed device-code flow until it resolves.
-async function pollSession(provider: OAuthProvider, start: DeviceStart, ctx: OnboardingContext, generation: number) {
+async function pollSession(
+  provider: OAuthProvider,
+  start: DeviceStart,
+  ctx: OnboardingContext,
+  generation: number,
+  addAccount: boolean
+) {
   try {
     const { error_message, status } = await pollOAuthSession(provider.id, start.session_id, ctx.scope)
 
@@ -961,6 +972,14 @@ async function pollSession(provider: OAuthProvider, start: DeviceStart, ctx: Onb
     if (status === 'approved') {
       clearPoll()
       setFlow({ status: 'success', provider })
+
+      if (addAccount) {
+        closeManualOnboarding()
+        ctx.onCompleted?.()
+
+        return
+      }
+
       await completeWithModelConfirm(ctx, provider.name, [provider.id], reason =>
         setFlow({
           status: 'error',

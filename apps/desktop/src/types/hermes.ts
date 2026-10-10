@@ -94,7 +94,29 @@ export interface OAuthProviderStatus {
   token_preview?: null | string
 }
 
+export interface OAuthAccount {
+  id: string
+  label: string
+  priority: number
+  /** Effective availability, including the source account for shared rows. */
+  enabled?: boolean
+  owner_profile?: string
+  owner_credential_id?: string
+  owner_enabled?: boolean
+  /** This profile's assignment toggle, independent of source availability. */
+  configured_enabled?: boolean
+  missing?: boolean
+  unavailable_reason?: string
+  shared?: boolean
+  last_status?: null | string
+}
+
 export interface OAuthProvider {
+  /** Advertised only by backends that can append without replacing the current login. */
+  supports_add_account?: boolean
+  supports_account_management?: boolean
+  accounts?: OAuthAccount[]
+  available_accounts?: OAuthAccount[]
   cli_command: string
   /** Shell command that clears an external provider's credentials, run in the
    *  embedded terminal. Null when Hermes doesn't know how to remove it. */

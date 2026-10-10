@@ -1865,9 +1865,9 @@ def _fallback_api_mode_hint(fb: dict, fb_provider: str, fb_base_url_hint: Option
 def _fallback_api_mode_resolved(agent, fb_provider: str, fb_model: str, fb_base_url: str) -> str:
     """Re-detect api_mode from provider / resolved base URL / model when the hint pass
     landed on the chat_completions default (never called for an explicit api_mode)."""
-    if fb_provider == "openai-codex":
+    from hermes_cli.models import normalize_provider, opencode_model_api_mode
+    if normalize_provider(fb_provider) == "openai-codex":
         return "codex_responses"
-    from hermes_cli.models import opencode_model_api_mode
     from hermes_cli.runtime_provider_custom import _opencode_family_for_custom
     opencode_family = _opencode_family_for_custom(fb_provider, fb_base_url)
     if opencode_family is not None:
@@ -1985,7 +1985,7 @@ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider:
     # Skip entries that resolve to the same backend that just failed — falling back to it loops the failure.
     # See #22548, #62984, #70893.
     from agent.backend_identity import BackendIdentity, should_skip_candidate
-    current_ident = BackendIdentity.build(provider=getattr(agent, "provider", ""),
+    current_ident = BackendIdentity.build(provider=getattr(agent, "requested_provider", "") or getattr(agent, "provider", ""),
         model=getattr(agent, "model", ""), base_url=str(getattr(agent, "base_url", "") or ""))
     fb_ident = BackendIdentity.build(provider=fb_provider, model=fb_model, base_url=(fb.get("base_url") or ""))
     if should_skip_candidate(fb_ident, current_ident):

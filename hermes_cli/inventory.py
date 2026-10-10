@@ -165,6 +165,9 @@ def build_models_payload(
 
     drop_unofferable_model_ids(rows)
 
+    from hermes_cli.codex_account_routes import append_account_providers
+    append_account_providers(rows, ctx.current_provider)
+
     return {"providers": rows, "model": ctx.current_model, "provider": ctx.current_provider}
 
 

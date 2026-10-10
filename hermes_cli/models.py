@@ -1123,9 +1123,9 @@ def _find_openrouter_slug(model_name: str) -> Optional[str]:
 
 
 def normalize_provider(provider: Optional[str]) -> str:
-    """Normalize provider aliases to canonical ids. ``"auto"`` passes through — use
-    ``hermes_cli.auth.resolve_provider()`` to resolve it from credentials."""
-    normalized = (provider or "openrouter").strip().lower()
+    """Canonical metadata identity for provider aliases and manually selected Codex accounts."""
+    from hermes_cli.codex_account_routes import canonical_codex_provider
+    normalized = canonical_codex_provider((provider or "openrouter").strip().lower())
     return _PROVIDER_ALIASES.get(normalized, normalized)
 
 

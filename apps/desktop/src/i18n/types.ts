@@ -1,3 +1,5 @@
+import type { ProviderSettingsTranslations } from './provider-settings.types'
+
 // Desktop i18n type contract.
 //
 // `Translations` is the single source of truth for every translatable string
@@ -1863,33 +1865,7 @@ export interface Translations {
         default: { title: string; message: string }
       }
     }
-    providers: {
-      connectAccount: string
-      haveApiKey: string
-      intro: string
-      connected: string
-      collapse: string
-      connectAnother: string
-      otherProviders: string
-      disconnect: string
-      disconnectInTerminal: string
-      removeConfirm: (provider: string) => string
-      removeExternalGeneric: (provider: string) => string
-      removeKeyManaged: (provider: string) => string
-      removeTerminalConfirm: (provider: string, command: string) => string
-      removeTerminalRunning: (provider: string) => string
-      removedTitle: string
-      removedMessage: (provider: string) => string
-      failedRemove: (provider: string) => string
-      noProviderKeys: string
-      searchKeys: string
-      noKeysMatch: string
-      localEndpoint: {
-        title: string
-        description: string
-      }
-      loading: string
-    }
+    providers: ProviderSettingsTranslations
     sessions: {
       loading: string
       archivedTitle: string

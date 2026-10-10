@@ -43,6 +43,9 @@ def _block_tokens(block: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _is_forkable_pool_row(provider_id: str, entry: Any) -> bool:
+    # Tokenless profile assignments name one canonical grant; they are never forked copies.
+    if isinstance(entry, dict) and entry.get("source") == "shared":
+        return False
     # An agent_key-only nous row carries no single-use refresh token: it is not a fork, and
     # stripping it while its providers block survives lets the profile's next load_pool('nous')
     # write that block over root's shared row. Same refresh_token gate the block strip uses.
@@ -61,6 +64,15 @@ def _is_oauth_pool_payload(entry: Any) -> bool:
         str(entry.get("auth_type") or "").strip().lower() == "oauth"
         or bool(str(entry.get("refresh_token") or "").strip())
         or str(entry.get("access_token") or "").startswith("sk-ant-oat"))
+
+
+def _clear_live_pool_tombstones(
+    store: Dict[str, Any], provider_id: str, live_ids: set[str],
+) -> None:
+    """Historical removals must not suppress future rotations of preserved live grants."""
+    removed = store.get("credential_pool_removed")
+    if isinstance(removed, dict) and isinstance(removed.get(provider_id), list):
+        removed[provider_id] = [row_id for row_id in removed[provider_id] if row_id not in live_ids]
 
 
 def merge_snapshot_auth_preserving_live_single_use_grants(
@@ -168,6 +180,7 @@ def merge_snapshot_auth_preserving_live_single_use_grants(
             if row_id not in consumed_ids
         ]
         snapshot_pool[provider_id] = live_without_id + live_only + merged_snapshot
+        _clear_live_pool_tombstones(restored, provider_id, set(live_grants_by_id))
 
     snapshot_providers = restored.get("providers")
     live_providers = live_store.get("providers")

@@ -3630,8 +3630,9 @@ def _pool_cache_hint(provider: str, *, main_runtime: Optional[Dict[str, Any]] = 
     """
     normalized = _normalize_aux_provider(provider)
     if normalized == "auto":
+        from hermes_cli.codex_account_routes import primary_account_route
         runtime = _normalize_main_runtime(main_runtime)
-        normalized = _normalize_aux_provider(runtime.get("provider") or _read_main_provider())
+        normalized = _normalize_aux_provider(primary_account_route(runtime) or _read_main_provider())
     if normalized in {"", "auto", "custom"}:
         return ""
     pool = _load_pool_with_credentials(normalized, " (cache hint)")
@@ -3676,6 +3677,10 @@ def _recoverable_pool_provider(
     provider: a rejection there says nothing about the key, so rotating/quarantining it would kill a
     working credential (Miho report — proxy users)."""
     normalized = _normalize_aux_provider(resolved_provider)
+    from hermes_cli.codex_account_routes import canonical_codex_provider, codex_account_id
+    effective = _effective_provider_for_client(client, "")
+    if normalized == "auto" and codex_account_id(effective):
+        normalized = effective
     base = str(getattr(client, "base_url", "") or "")
     runtime = _normalize_main_runtime(main_runtime)
     rt_base = str(runtime.get("base_url") or "")
@@ -3684,7 +3689,7 @@ def _recoverable_pool_provider(
     # Only the SESSION's own key is shielded, and only when it was sent somewhere other than the
     # session's origin (scheme+host+port — a port or HTTPS→HTTP change is a different trust boundary).
     # An independently owned auxiliary pool keeps rotating at its own origin.
-    if (base and rt_base and normalized == runtime.get("provider")
+    if (base and rt_base and canonical_codex_provider(normalized) == runtime.get("provider")
             and isinstance(rt_key, str) and rt_key and client_key == rt_key
             and base_url_origin(base) != base_url_origin(rt_base)):
         logger.info("Auxiliary: %s rejected the session key at %s, but the session's endpoint is %s — "
@@ -3745,7 +3750,10 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
         return True
 
     if _is_auth_error(exc):
-        if pool.try_refresh_current() is not None:
+        from hermes_cli.codex_account_routes import codex_account_id
+        refreshed = (pool.try_refresh_matching(api_key_hint=failed_api_key or None)
+                     if codex_account_id(normalized) else pool.try_refresh_current())
+        if refreshed is not None:
             _evict_cached_clients(normalized)
             return True
         return _rotate(401)
@@ -3910,6 +3918,9 @@ def _auth_refresh_provider_for_route(
     """Provider whose short-lived credentials should be refreshed; auto-routed calls keep
     ``resolved_provider == "auto"``, so infer the backend from the client's base URL."""
     normalized = _normalize_aux_provider(resolved_provider)
+    from hermes_cli.codex_account_routes import codex_account_id
+    if normalized == "auto" and codex_account_id(effective_provider):
+        return effective_provider
     if normalized and normalized != "auto":
         return normalized
     host_provider = _provider_for_host(client_base_url, _AUTH_REFRESH_PROVIDER_BY_HOST)
@@ -4555,7 +4566,8 @@ def _warn_stale_openai_base_url(runtime_provider: str) -> None:
 def _main_route_target(runtime: Dict[str, Any], task: Optional[str]) -> Tuple[str, str, str, Any, str]:
     """Step-1 target: (provider, model, base_url, api_key, api_mode) of the main runtime, after the
     fast-model opt-in and the MoA aggregator substitution."""
-    main_provider = str(runtime.get("provider", "") or _read_main_provider() or "")
+    from hermes_cli.codex_account_routes import primary_account_route
+    main_provider = str(primary_account_route(runtime) or _read_main_provider() or "")
     main_model = str(runtime.get("model") or _read_main_model() or "")
     runtime_base_url = str(runtime.get("base_url") or "")
     runtime_api_key = runtime.get("api_key", "")
@@ -5038,28 +5050,6 @@ def _resolve_nous_branch(req: _ResolveRequest) -> _ResolveResult:
     return _route_client(req, client, final_model)
 
 
-def _resolve_openai_codex_branch(req: _ResolveRequest) -> _ResolveResult:
-    """OpenAI Codex (OAuth → Responses API)."""
-    model = req.model
-    if not model:
-        logger.warning("resolve_provider_client: openai-codex requested without a "
-                       "model; pass model explicitly (e.g. model.model in config.yaml "
-                       "or auxiliary.<task>.model for per-task aux routing).")
-        return None, None
-    no_token_msg = "resolve_provider_client: openai-codex requested but no Codex OAuth token found (run: hermes model)"
-    if req.raw_codex:
-        # Raw OpenAI client for callers needing responses.stream() (main agent loop).
-        codex_token, base_url = _resolve_codex_credential_and_base()
-        if not codex_token:
-            logger.warning(no_token_msg)
-            return None, None
-        raw_client = _create_openai_client(api_key=codex_token, base_url=base_url,
-                                           default_headers=_codex_cloudflare_headers(codex_token, base_url=base_url))
-        return raw_client, _normalize_resolved_model(model, req.provider)
-    client, default = _build_codex_client(model)
-    return _route_or_warn(req, client, default, no_token_msg)
-
-
 def _resolve_xai_oauth_branch(req: _ResolveRequest) -> _ResolveResult:
     """xAI Grok OAuth (device code → Responses API). Without this branch xai-oauth falls to the generic
     oauth_external arm, returns (None, None), and silently re-routes every aux task to the Step-2 fallback."""
@@ -5413,11 +5403,13 @@ def _resolve_registry_branch(req: _ResolveRequest) -> _ResolveResult:
 
 # Explicit providers with a dedicated branch; anything else falls through to named custom
 # providers → azure-foundry → PROVIDER_REGISTRY (order preserved from the original if-chain).
+from agent.auxiliary_codex_routes import resolve_codex_client
+
 _EXPLICIT_PROVIDER_BRANCHES: Dict[str, Callable[[_ResolveRequest], _ResolveResult]] = {
     "auto": _resolve_auto_branch,
     "openrouter": _resolve_openrouter_branch,
     "nous": _resolve_nous_branch,
-    "openai-codex": _resolve_openai_codex_branch,
+    "openai-codex": resolve_codex_client,
     "xai-oauth": _resolve_xai_oauth_branch,
     "custom": _resolve_custom_branch,
 }
@@ -5493,7 +5485,8 @@ def resolve_provider_client(
         provider, original_provider, model, async_mode, raw_codex,
         explicit_base_url, explicit_api_key, api_mode, main_runtime, is_vision, task,
     )
-    branch = _EXPLICIT_PROVIDER_BRANCHES.get(provider)
+    from hermes_cli.codex_account_routes import canonical_codex_provider
+    branch = _EXPLICIT_PROVIDER_BRANCHES.get(canonical_codex_provider(provider))
     alias_identity = original_provider.removeprefix("custom:")
     # A configured provider whose name collides with a local-server alias is still a named
     # provider. Resolve it before the alias's generic ``custom`` branch, which otherwise loses

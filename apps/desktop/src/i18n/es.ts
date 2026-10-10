@@ -1,3 +1,4 @@
+import { esProviders } from './es_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale, type TranslationOverrides } from './define-locale'
@@ -2574,36 +2575,7 @@ export const esOverrides = {
         }
       }
     },
-    providers: {
-      connectAccount: 'Conectar una cuenta',
-      haveApiKey: '¿Tienes una clave API?',
-      intro:
-        'Inicia sesión con una suscripción, sin copiar claves API. Hermes ejecuta el inicio de sesión del navegador por ti, aquí mismo en la app.',
-      connected: 'Conectado',
-      collapse: 'Contraer',
-      connectAnother: 'Conectar otro proveedor',
-      otherProviders: 'Otros proveedores',
-      disconnect: 'Desconectar',
-      disconnectInTerminal: 'Desconectar (ejecuta el comando de eliminación en el terminal)',
-      removeConfirm: provider => `¿Eliminar ${provider}?`,
-      removeExternalGeneric: provider => `${provider} se gestiona con su propia CLI; elimínalo allí.`,
-      removeKeyManaged: provider => `${provider} se configura con una clave API. Quítalo en Claves API.`,
-      removeTerminalConfirm: (provider, command) =>
-        `¿Desconectar ${provider}? Esto ejecutará “${command}” en el terminal para borrar la credencial.`,
-      removeTerminalRunning: provider => `Ejecutando la desconexión de ${provider} en el terminal…`,
-      removedTitle: 'Cuenta eliminada',
-      removedMessage: provider => `Se eliminó ${provider}.`,
-      failedRemove: provider => `No se pudo eliminar ${provider}`,
-      noProviderKeys: 'No hay claves API de proveedores disponibles.',
-      searchKeys: 'Buscar proveedores…',
-      noKeysMatch: 'Ningún proveedor coincide con tu búsqueda.',
-      localEndpoint: {
-        title: 'Endpoint local o personalizado',
-        description:
-          'Conecta Hermes con cualquier endpoint compatible con OpenAI (Zyphra, vLLM, llama.cpp, Ollama, etc.).'
-      },
-      loading: 'Cargando proveedores...'
-    },
+    providers: esProviders,
     sessions: {
       loading: 'Cargando sesiones archivadas…',
       archivedTitle: 'Sesiones archivadas',

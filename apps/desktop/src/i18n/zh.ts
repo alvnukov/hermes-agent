@@ -1,3 +1,4 @@
+import { zhProviders } from './zh_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale } from './define-locale'
@@ -2087,33 +2088,7 @@ export const zh = defineLocale({
         default: { title: '账单请求失败', message: '账单请求失败。' }
       }
     },
-    providers: {
-      connectAccount: '连接账号',
-      haveApiKey: '改用 API 密钥？',
-      intro: '使用订阅登录，无需复制 API 密钥。Hermes 会在应用中为你完成浏览器登录。',
-      connected: '已连接',
-      collapse: '收起',
-      connectAnother: '连接其他提供方',
-      otherProviders: '其他提供方',
-      disconnect: '断开连接',
-      disconnectInTerminal: '断开连接（在终端中运行移除命令）',
-      removeConfirm: provider => `移除 ${provider}？`,
-      removeExternalGeneric: provider => `${provider} 由其自身的 CLI 管理 — 请在那里移除。`,
-      removeKeyManaged: provider => `${provider} 由 API 密钥配置。请从 API Keys 中移除。`,
-      removeTerminalConfirm: (provider, command) => `断开 ${provider}？这将在终端中运行 "${command}" 以清除凭据。`,
-      removeTerminalRunning: provider => `正在终端中断开 ${provider}…`,
-      removedTitle: '账号已移除',
-      removedMessage: provider => `${provider} 已移除。`,
-      failedRemove: provider => `无法移除 ${provider}`,
-      noProviderKeys: '没有可用的提供方 API 密钥。',
-      searchKeys: '搜索提供方…',
-      noKeysMatch: '没有匹配的提供方。',
-      localEndpoint: {
-        title: '本地 / 自定义端点',
-        description: '将 Hermes 指向任意 OpenAI 兼容端点（Zyphra、vLLM、llama.cpp、Ollama 等）。'
-      },
-      loading: '正在加载提供方...'
-    },
+    providers: zhProviders,
     sessions: {
       loading: '正在加载已归档会话…',
       archivedTitle: '已归档会话',

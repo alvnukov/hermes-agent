@@ -1,3 +1,4 @@
+import { ruProviders } from './ru_providers'
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
 import { defineLocale } from './define-locale'
@@ -1522,35 +1523,7 @@ export const ru = defineLocale({
         curator: { label: 'Куратор', hint: 'Просмотр использования навыков' }
       }
     },
-    providers: {
-      connectAccount: 'Подключить аккаунт',
-      haveApiKey: 'Ввести API-ключ вместо этого?',
-      intro:
-        'Войдите по подписке — копировать API-ключ не нужно. Hermes проведёт вход в браузере прямо здесь, в приложении.',
-      connected: 'Подключено',
-      collapse: 'Свернуть',
-      connectAnother: 'Подключить другой провайдер',
-      otherProviders: 'Другие провайдеры',
-      disconnect: 'Отключить',
-      disconnectInTerminal: 'Отключить (выполнит команду удаления в терминале)',
-      removeConfirm: provider => `Удалить ${provider}?`,
-      removeExternalGeneric: provider => `${provider} управляется собственным CLI — удалите его там.`,
-      removeKeyManaged: provider => `${provider} настроен по API-ключу. Удалите его в разделе API-ключи.`,
-      removeTerminalConfirm: (provider, command) =>
-        `Отключить ${provider}? В терминале будет выполнена команда "${command}" для сброса учётных данных.`,
-      removeTerminalRunning: provider => `Выполняется отключение ${provider} в терминале…`,
-      removedTitle: 'Аккаунт удалён',
-      removedMessage: provider => `${provider} удалён.`,
-      failedRemove: provider => `Не удалось удалить ${provider}`,
-      noProviderKeys: 'API-ключи провайдеров недоступны.',
-      searchKeys: 'Поиск провайдеров…',
-      noKeysMatch: 'Провайдеры, подходящие под поиск, не найдены.',
-      localEndpoint: {
-        title: 'Локальный / свой эндпоинт',
-        description: 'Направьте Hermes на любой OpenAI-совместимый эндпоинт (Zyphra, vLLM, llama.cpp, Ollama и т. д.).'
-      },
-      loading: 'Загрузка провайдеров…'
-    },
+    providers: ruProviders,
     sessions: {
       loading: 'Загрузка архивных сеансов…',
       archivedTitle: 'Архивные сеансы',

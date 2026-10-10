@@ -43,7 +43,7 @@ beforeEach(() => {
       openExternal: vi.fn(async () => undefined),
       api: vi.fn(async (request: HermesApiRequest) => {
         requests.push(request)
-        const { path } = request
+        const path = request.path.split('?')[0]
 
         if (path === '/api/providers/oauth') {
           return { providers: [makeOAuthProvider('openai-codex')] }
@@ -107,6 +107,32 @@ function switchForeground() {
   setApiRequestConnection('local')
   setApiRequestProfile('default')
 }
+
+it('adds an account on its captured owner without changing the model, then resets the login mode', async () => {
+  startManualProviderOAuth('openai-codex', owner.profile, true)
+
+  const ctx: OnboardingContext = {
+    scope: $desktopOnboarding.get().targetScope,
+    requestGateway: vi.fn(async () => ({ ok: true }) as never)
+  }
+
+  const provider = { ...makeOAuthProvider('openai-codex'), flow: 'device_code' as const }
+  await startProviderOAuth(provider, ctx)
+  expect(requests.find(r => r.method === 'POST')).toMatchObject({
+    ...owner,
+    path: '/api/providers/oauth/openai-codex/start?add_account=true'
+  })
+  switchForeground()
+  await vi.advanceTimersByTimeAsync(2000)
+  expect($desktopOnboarding.get().manual).toBe(false)
+  expect(requests.some(r => r.path === '/api/model/set')).toBe(false)
+  expect(ctx.requestGateway).not.toHaveBeenCalled()
+  expectOwnerRequests()
+
+  startManualProviderOAuth('openai-codex', 'default')
+  await startProviderOAuth(provider, { ...ctx, scope: $desktopOnboarding.get().targetScope })
+  expect(requests.filter(r => r.method === 'POST').at(-1)?.path).toBe('/api/providers/oauth/openai-codex/start')
+})
 
 function expectOwnerRequests() {
   expect(requests.length).toBeGreaterThan(0)

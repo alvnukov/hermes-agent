@@ -367,6 +367,36 @@ def test_profile_auth_add_owns_only_its_own_rows(fleet):
     assert [e["id"] for e in fleet["rows"](fleet["root"])] == ["abc123"]
 
 
+def test_profile_codex_add_never_copies_root_singleton_without_pool(fleet):
+    """A legacy root singleton stays root-owned when a profile adds its own grant."""
+    from agent.credential_pool import AUTH_TYPE_OAUTH, PooledCredential, load_pool
+
+    kid = _profile(fleet, "codexkid")
+    root_file = fleet["root"] / "auth.json"
+    root_store = json.loads(root_file.read_text())
+    root_store["providers"]["openai-codex"] = {
+        "tokens": {"access_token": "root-codex-access", "refresh_token": "root-codex-refresh"},
+        "auth_mode": "chatgpt",
+    }
+    root_file.write_text(json.dumps(root_store))
+    root_before = root_file.read_bytes()
+    fleet["use"](kid)
+
+    pool = load_pool("openai-codex")
+    pool.add_entry(PooledCredential(
+        provider="openai-codex", id="owncod", label="mine", auth_type=AUTH_TYPE_OAUTH,
+        priority=0, source="manual:device_code", access_token="profile-codex-access",
+        refresh_token="profile-codex-refresh",
+    ))
+    for _ in range(3):
+        rows = json.loads((kid / "auth.json").read_text())["credential_pool"]["openai-codex"]
+        assert [row["id"] for row in rows] == ["owncod"], "root singleton was copied into the profile"
+        assert rows[0]["refresh_token"] == "profile-codex-refresh"
+        assert root_file.read_bytes() == root_before
+        pool = load_pool("openai-codex")
+        assert [entry.id for entry in pool.entries()] == ["owncod"]
+
+
 def test_classic_mode_persist_is_unchanged(fleet):
     from agent.credential_pool import load_pool
 

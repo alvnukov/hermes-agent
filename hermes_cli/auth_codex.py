@@ -948,6 +948,7 @@ def _login_openai_codex(args, pconfig: ProviderConfig, *, force_new_login: bool 
         _offer_existing_oauth_credentials, _print_login_success, _prompt_yes_no, _save_codex_tokens,
         _update_config_for_provider, resolve_codex_runtime_credentials)
     from hermes_cli.auth_codex_browser import codex_oauth_login
+    from agent.credential_accounts import account_pool, finalize_account_login
     del pconfig  # kept for parity with other provider login helpers
     if not force_new_login:
         if _offer_existing_oauth_credentials(
@@ -962,7 +963,9 @@ def _login_openai_codex(args, pconfig: ProviderConfig, *, force_new_login: bool 
             print("Hermes will create its own session to avoid conflicts with Codex CLI / VS Code.")
             if _prompt_yes_no(
                 "Import these credentials? (a separate login is recommended) [y/N]: ", default="n"):
+                account_pool("openai-codex")
                 _save_codex_tokens(cli_tokens)
+                finalize_account_login("openai-codex")
                 config_path = _update_config_for_provider("openai-codex", _codex_base_url())
                 print()
                 print("Credentials imported. Note: if Codex CLI refreshes its token,")
@@ -974,7 +977,9 @@ def _login_openai_codex(args, pconfig: ProviderConfig, *, force_new_login: bool 
     # to the browser flow).
     print()
     creds = codex_oauth_login(args)
+    account_pool("openai-codex")
     _save_codex_tokens(creds["tokens"], creds.get("last_refresh"))
+    finalize_account_login("openai-codex")
     config_path = _update_config_for_provider(
         "openai-codex", creds.get("base_url", DEFAULT_CODEX_BASE_URL))
     _print_login_success("openai-codex", config_path, show_auth_state=True)

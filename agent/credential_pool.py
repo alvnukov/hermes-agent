@@ -1,8 +1,13 @@
 """Persistent multi-credential pool for same-provider failover."""
 
 from __future__ import annotations
+from agent.credential_pool_persistence import (
+    _profile_owns_pool_provider,
+    _store_owns_pool_provider,
+    persist_pool_entries,
+)
 
-from agent.credential_pool_admin import CredentialPoolAdminMixin
+from agent.credential_pool_admin import CredentialPoolAdminMixin, sync_shared_accounts
 from agent.credential_pool_model_cooldowns import CredentialPoolModelCooldownMixin, model_cooldown_until
 
 import logging
@@ -215,6 +220,7 @@ class PooledCredential:
     priority: int
     source: str
     access_token: str
+    enabled: bool = True
     refresh_token: Optional[str] = None
     last_status: Optional[str] = None
     last_status_at: Optional[float] = None
@@ -281,7 +287,7 @@ class PooledCredential:
             if value is not None or field_def.name in _CLEAR_STATUS:
                 result[field_def.name] = value
         for k, v in self.extra.items():
-            if v is not None:
+            if v is not None and not k.startswith("_owner_") and k != "shared_unavailable":
                 result[k] = v
         return sanitize_borrowed_credential_payload(result, self.provider)
 
@@ -606,34 +612,6 @@ def get_pool_strategy(provider: str) -> str:
     return strategy if strategy in SUPPORTED_POOL_STRATEGIES else STRATEGY_FILL_FIRST
 
 
-def _keyed_custom_pool_matches(
-    pool_provider: str,
-    provider_norm: str,
-    base_url: Optional[str],
-) -> bool:
-    """Match a durable ``providers.<key>`` pool against runtime identities."""
-    runtime_url = _norm_url(base_url)
-    if not runtime_url:
-        return False
-    try:
-        for normalized_name, entry in _iter_custom_providers():
-            provider_key = _normalize_custom_pool_name(str(entry.get("provider_key") or ""))
-            if provider_key != pool_provider:
-                continue
-            aliases = _custom_entry_name_aliases(normalized_name, entry)
-            aliases.add(f"{CUSTOM_POOL_PREFIX}{normalized_name}")
-            if provider_key:
-                aliases.add(f"{CUSTOM_POOL_PREFIX}{provider_key}")
-            configured_url = _norm_url(entry.get("base_url"))
-            if provider_norm == "custom":
-                return runtime_url == configured_url
-            runtime_aliases = _requested_custom_name_aliases(provider_norm)
-            return bool(runtime_aliases & aliases) and runtime_url == configured_url
-    except Exception:
-        return False
-    return False
-
-
 def _legacy_custom_pool_matches(
     pool_provider: str,
     provider_norm: str,
@@ -691,6 +669,10 @@ def credential_pool_matches_provider(
     identities fail closed. Legacy pool adapters without a ``provider``
     attribute remain compatible; production pools are scoped.
     """
+    from hermes_cli.codex_account_routes import account_pool_matches
+    account_match = account_pool_matches(pool_or_provider, provider)
+    if account_match is not None:
+        return account_match
     raw_pool_provider = getattr(pool_or_provider, "provider", None)
     if raw_pool_provider is None:
         if not isinstance(pool_or_provider, str):
@@ -705,7 +687,8 @@ def credential_pool_matches_provider(
     if not pool_provider.startswith(CUSTOM_POOL_PREFIX):
         if pool_provider == provider_norm:
             return True
-        return _keyed_custom_pool_matches(pool_provider, provider_norm, base_url)
+        from agent.credential_pool_routing import keyed_custom_pool_matches
+        return keyed_custom_pool_matches(pool_provider, provider_norm, base_url)
     if provider_norm == "custom":
         try:
             matched_pool = get_custom_provider_pool_key(base_url or "")
@@ -829,28 +812,8 @@ def _singleton_target_for_entry(pool: "CredentialPool", entry: "PooledCredential
         return None
 
 
-def _store_owns_pool_provider(auth_store: Dict[str, Any], provider: str) -> bool:
-    """True when an already-loaded *auth_store* has its own rows for *provider*."""
-    pool = auth_store.get("credential_pool")
-    entries = pool.get(provider) if isinstance(pool, dict) else None
-    return isinstance(entries, list) and bool(entries)
 
 
-def _profile_owns_pool_provider(provider: str) -> bool:
-    """True when the ACTIVE auth.json has its own rows for *provider*.
-
-    Named profiles with no local rows read the provider through the
-    ``read_credential_pool`` global-root fallback ("borrowing").
-    """
-    # Classic mode (profile == root) has no root fallback, so the answer is always "owns";
-    # skip the per-call auth.json re-read on this hot load_pool path.
-    if auth_mod._global_auth_file_path() is None:
-        return True
-    try:
-        auth_store = _load_auth_store()
-    except Exception:
-        return True  # unreadable store: assume ownership, keep legacy path
-    return _store_owns_pool_provider(auth_store, provider)
 
 
 def _borrowed_single_use_pool_root() -> Optional[Path]:
@@ -863,92 +826,6 @@ def _borrowed_single_use_pool_root() -> Optional[Path]:
         return _guarded_global_root(_global_auth_file_path())
     except Exception:
         return None
-
-
-def _update_root_pool_rows(
-    provider: str, payloads: List[Dict[str, Any]], global_path: Path,
-    *, status_cleared_ids: Optional[Iterable[str]] = None,
-    token_bases: Optional[Dict[str, Tuple[Any, Any]]] = None,
-) -> List[Dict[str, Any]]:
-    """UPDATE-ONLY merge of *payloads* into the root store's rows for *provider*.
-
-    A borrower may refresh the root's rows (rotation, cooldown state) but
-    never add or delete them — the root owns their lifecycle. In particular a
-    profile's singleton-prune (it has no ``.anthropic_oauth.json`` of its own)
-    must not delete the root grant, so ``removed_ids`` is ignored by callers.
-    """
-    with _auth_store_lock(target_path=global_path):
-        store = _load_auth_store(global_path)
-        pool = store.get("credential_pool")
-        if not isinstance(pool, dict):
-            pool = {}
-            store["credential_pool"] = pool
-        existing = pool.get(provider)
-        existing_list = existing if isinstance(existing, list) else []
-        incoming_by_id = auth_mod._entry_ids(payloads)
-        cleared = {cid for cid in (status_cleared_ids or ()) if cid}
-        bases = token_bases or {}
-        merged: List[Dict[str, Any]] = []
-        changed = False
-        for disk_entry in existing_list:
-            did = disk_entry.get("id") if isinstance(disk_entry, dict) else None
-            incoming = incoming_by_id.get(did) if did else None
-            if incoming is None:
-                merged.append(disk_entry)
-                continue
-            updated = auth_mod._merge_pool_row_generation(
-                incoming, disk_entry, provider,
-                base_pair=bases.get(did), status_cleared=did in cleared,
-            )
-            if updated != disk_entry:
-                changed = True
-            merged.append(updated)
-        if changed:
-            pool[provider] = merged
-            _save_auth_store(store, target_path=global_path)
-        return merged
-
-
-def persist_pool_entries(
-    provider: str,
-    payloads: List[Dict[str, Any]],
-    *,
-    removed_ids: Optional[Iterable[str]] = None,
-    status_cleared_ids: Optional[Iterable[str]] = None,
-    token_bases: Optional[Dict[str, Tuple[Any, Any]]] = None,
-) -> Optional[List[Dict[str, Any]]]:
-    """Persist a provider's pool rows to the store that OWNS them.
-
-    A named profile that sees a single-use-refresh provider (see
-    ``SINGLE_USE_REFRESH_POOL_PROVIDERS``) only through the global-root fallback must not
-    materialize a local ``credential_pool.<provider>`` copy: that copy forks
-    the single-use refresh token, the first profile to rotate commits the new
-    pair only to its own file, and root plus every sibling die with
-    ``invalid_grant`` (#100339). Such rows are written back to the root store
-    (under the root lock); everything else goes to the active store.
-    """
-    if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider):
-        global_path = _borrowed_single_use_pool_root()
-        if global_path is not None:
-            try:
-                return _update_root_pool_rows(
-                    provider, payloads, global_path,
-                    status_cleared_ids=status_cleared_ids, token_bases=token_bases,
-                )
-            except Exception as exc:
-                # Fail closed on the FORK, not on the save: never fall back to
-                # writing a local copy (that IS the bug). The in-memory pool
-                # still holds the rotated pair for this process.
-                logger.warning(
-                    "%s pool: write-through of borrowed root grant failed (%s); "
-                    "not materializing a profile-local copy",
-                    provider, exc,
-                )
-            return None
-    return write_credential_pool(
-        provider, payloads, removed_ids=removed_ids, status_cleared_ids=status_cleared_ids,
-        token_bases=token_bases,
-    )
 
 
 # --- Per-provider singleton refresh plumbing -------------------------------
@@ -1079,14 +956,14 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 for until in (
                     _exhausted_until(entry, sole_credential=sole_credential)
                     for entry in self._entries
-                    if entry.last_status == STATUS_EXHAUSTED
+                    if entry.enabled and not entry.extra.get("shared_unavailable") and entry.last_status == STATUS_EXHAUSTED
                 )
                 if until is not None
             ]
             candidates.extend(
                 until
                 for entry in self._entries
-                if entry.last_status != STATUS_DEAD
+                if entry.enabled and not entry.extra.get("shared_unavailable") and entry.last_status != STATUS_DEAD
                 for until in (model_cooldown_until(entry, model),)
                 if until is not None
             )
@@ -1098,15 +975,38 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _is_sole_credential(self) -> bool:
         """DEAD entries never re-enter rotation, so <=1 non-DEAD entry means nothing to rotate to."""
-        return sum(1 for e in self._entries if e.last_status != STATUS_DEAD) <= 1
+        return sum(1 for e in self._entries if e.enabled and not e.extra.get("shared_unavailable")
+                   and e.last_status != STATUS_DEAD) <= 1
 
     def _find(self, predicate: Callable[[PooledCredential], bool]) -> Optional[PooledCredential]:
         return next((e for e in self._entries if predicate(e)), None)
 
     def _current_unlocked(self) -> Optional[PooledCredential]:
+        self._sync_live_controls()
         if not self._current_id:
             return None
-        return self._find(lambda e: e.id == self._current_id)
+        return self._find(lambda e: e.id == self._current_id and e.enabled
+                          and not e.extra.get("shared_unavailable"))
+
+    def _sync_live_controls(self) -> None:
+        """Observe peer lifecycle edits before choosing from an already loaded pool."""
+        from agent.credential_accounts import hydrate_reference
+        rows = auth_mod._entry_ids(read_credential_pool(self.provider))
+        live = []
+        for entry in self._entries:
+            disk = rows.get(entry.id)
+            if disk is None and entry.id in self._persisted_token_pairs:
+                continue
+            if disk is not None:
+                if disk.get("source") == "shared" and (entry.source != "shared" or
+                    any(entry.extra.get(key) != disk.get(key) for key in ("owner_profile", "owner_credential_id"))):
+                    entry = PooledCredential.from_dict(self.provider, disk)
+                updates = {"enabled": disk.get("enabled", True), "label": disk.get("label", entry.label),
+                           "priority": disk.get("priority", entry.priority)}
+                if any(getattr(entry, key) != value for key, value in updates.items()):
+                    entry = replace(entry, **updates)
+            live.append(hydrate_reference(entry))
+        self._entries = sync_shared_accounts(self, live, rows)
 
     def current(self) -> Optional[PooledCredential]:
         with self._lock:
@@ -1147,20 +1047,28 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         *,
         removed_ids: Optional[List[str]] = None,
         status_cleared_ids: Optional[List[str]] = None,
+        control_updated_ids: Optional[List[str]] = None,
     ) -> None:
         # Self-locking: snapshotting self._entries must not race a rotation.
         with self._lock:
+            if control_updated_ids is None and removed_ids is None:
+                from agent.credential_accounts import persist_reference_status
+                persist_reference_status(self.provider, self._entries,
+                                         status_cleared_ids=status_cleared_ids or ())
             payloads = [entry.to_dict() for entry in self._entries]
             written = persist_pool_entries(
                 self.provider, payloads,
                 removed_ids=removed_ids,
                 status_cleared_ids=status_cleared_ids,
                 token_bases=self._persisted_token_pairs,
+                control_updated_ids=control_updated_ids,
             )
             if written is None:
                 return
             rows = auth_mod._entry_ids(written)
+            known_ids = set(self._persisted_token_pairs)
             self._persisted_token_pairs = auth_mod._token_pairs_by_id(written)
+            self._entries = [e for e in self._entries if e.id in rows or e.id not in known_ids]
             for entry in self._entries:
                 row = rows.get(entry.id)
                 pair = self._persisted_token_pairs.get(entry.id, (None, None))
@@ -1307,7 +1215,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         the pool store, is token authority for those sources; a row with no
         token material at all is refused for the same reason.
         """
-        if self.provider not in ("anthropic", "xai-oauth") and plugin_refresh_hook(self.provider) is None:
+        if self.provider not in ("anthropic", "openai-codex", "xai-oauth") and plugin_refresh_hook(self.provider) is None:
             return entry
         is_anthropic = self.provider == "anthropic"
         is_xai = self.provider == "xai-oauth"
@@ -1527,6 +1435,16 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
     # ---- refresh -----------------------------------------------------------
 
     def _refresh_entry(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
+        with self._lock:
+            self._sync_live_controls()
+            entry = self._find(lambda e: e.id == entry.id)
+        if entry is None:
+            return None
+        if entry.source == "shared":
+            from agent.credential_accounts import refresh_reference
+            return refresh_reference(self, entry, force=force)
+        if not entry.enabled:
+            return None
         if entry.auth_type != AUTH_TYPE_OAUTH or not entry.refresh_token:
             if force:
                 self._mark_exhausted(entry, None)
@@ -1545,8 +1463,19 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # cross-process auth-store flock; a waiter's in-lock re-sync picks up
         # the winner's rotated token and skips the POST.
         with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
+            with self._lock:
+                self._sync_live_controls()
+                current = self._find(lambda e: e.id == entry.id)
+            if current is None or not current.enabled:
+                return None
+            entry = current
             if self.provider == "openai-codex":
-                synced = self._sync_entry_from_auth_store(entry)
+                synced = self._sync_entry_from_pool_store(entry)
+                synced = self._sync_entry_from_auth_store(synced)
+                if not synced.enabled:
+                    return None
+                if (synced.access_token, synced.refresh_token) != (entry.access_token, entry.refresh_token):
+                    return synced
                 if synced is not entry and not force and not self._entry_needs_refresh(synced):
                     return synced
                 return self._refresh_entry_impl(synced, force=force)
@@ -1948,12 +1877,28 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         429/quota-shaped errors; the probe is throttled per token (5 min) so
         it is safe on the hot selection path.
         """
+        if not entry.enabled:
+            return False
+        if entry.source == "shared":
+            from agent.credential_accounts import refresh_reference
+            return bool(refresh_reference(self, entry, probe=True))
         if self.provider != "openai-codex" or entry.last_status != STATUS_EXHAUSTED:
             return False
         if not auth_mod._is_codex_rate_limit_shaped(
             entry.last_error_code, entry.last_error_reason, entry.last_error_message,
         ):
             return False
+        with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
+            with self._lock:
+                self._sync_live_controls()
+                current = self._find(lambda e: e.id == entry.id)
+            if current is None or not current.enabled:
+                return False
+            current = self._sync_entry_from_pool_store(current)
+            return self._codex_quota_restored_locked(current)
+
+    def _codex_quota_restored_locked(self, entry: PooledCredential) -> bool:
+        """Refresh and probe one canonical generation while its auth-store lock is held."""
         token = entry.access_token or ""
         if not token:
             return False
@@ -2081,6 +2026,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         refreshes them outside the lock instead of stalling every pool
         consumer during cross-process flock acquisition + OAuth network I/O.
         """
+        self._sync_live_controls()
         now = time.time()
         cleared_any = False
         entries_to_prune: List[str] = []
@@ -2088,6 +2034,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         pending_refresh: List[PooledCredential] = []
         sole_credential = self._is_sole_credential()
         for entry in self._entries:
+            if not entry.enabled or entry.extra.get("shared_unavailable"):
+                continue
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load; never lease an
             # unhydrated duplicate as an empty key.
@@ -2397,6 +2345,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
     ) -> Tuple[Optional[str], List[PooledCredential]]:
         with self._lock:
             if credential_id:
+                self._sync_live_controls()
+                entry = self._find(lambda e: e.id == credential_id)
+                if entry is None or not entry.enabled or entry.extra.get("shared_unavailable"):
+                    return None, []
                 self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
                 self._current_id = credential_id
                 return credential_id, []
@@ -2809,7 +2761,15 @@ def _seed_tokens_singleton(seed: _Seeder, auth_store: Dict[str, Any]) -> None:
     Codex CLI / VS Code causes refresh_token_reused races. Adoption is an
     explicit one-time prompt via `hermes auth openai-codex`.
     """
-    state = _load_provider_state(auth_store, seed.provider)
+    state, source_path = _load_provider_state_with_source(auth_store, seed.provider)
+    global_root = _global_auth_file_path()
+    if (
+        source_path is not None and global_root is not None and _same_path(source_path, global_root)
+        and _store_owns_pool_provider(auth_store, seed.provider)
+    ):
+        # A profile's explicit pool replaces the borrowed singleton; re-seeding
+        # root here would fork its single-use refresh token on the next persist.
+        return
     tokens = state.get("tokens") if isinstance(state, dict) else None
     if not (isinstance(tokens, dict) and tokens.get("access_token")):
         return
@@ -2999,6 +2959,8 @@ def _prune_stale_seeded_entries(
     prune_env_sources: bool = True,
 ) -> bool:
     def _is_prunable(entry: PooledCredential) -> bool:
+        if entry.source == "shared":
+            return False
         # ``env:*`` entries are persisted references re-hydrated on every load.
         # A process that merely lacks the env var must NOT delete the on-disk
         # entry for every other process (#9331); prune only when explicitly
@@ -3069,6 +3031,10 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
+    from hermes_cli.codex_account_routes import account_route_pool
+    account = account_route_pool(provider)
+    if account is not None:
+        return account
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS:
         # One-time heal for installs that forked this grant across profiles
         # before the clone-strip / root write-through existed (#100339).
@@ -3082,6 +3048,7 @@ def load_pool(provider: str) -> CredentialPool:
         for payload in raw_entries
     )
     entries = [PooledCredential.from_dict(provider, payload) for payload in raw_entries]
+    explicitly_selected = bool(_load_auth_store().get("credential_pool_selections", {}).get(provider))
     raw_needs_auth_normalization = any(
         isinstance(payload, dict)
         and _normalize_pool_auth_type(
@@ -3097,7 +3064,9 @@ def load_pool(provider: str) -> CredentialPool:
         active_entries = active_pool.get(provider) if isinstance(active_pool, dict) else None
         changed |= bool(active_entries)
 
-    if provider.startswith(CUSTOM_POOL_PREFIX):
+    if explicitly_selected:
+        pass  # Explicit assignments are the complete provider selection, even when empty.
+    elif provider.startswith(CUSTOM_POOL_PREFIX):
         custom_changed, custom_sources = _seed_custom_pool(provider, entries)
         changed |= custom_changed
         changed |= _prune_stale_seeded_entries(entries, custom_sources)
@@ -3133,12 +3102,22 @@ def load_pool(provider: str) -> CredentialPool:
     # Remember the root's borrowed rows so a later ``add_entry`` in this
     # profile leaves them out of the profile's own store (#100339).
     # No disk rows -> nothing borrowed; the ``set()`` default already applies.
-    if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and disk_ids:
+    if disk_ids:
         # Reuse the pre-persist ownership answer unless _persist() just rewrote
         # the store (it can give the profile its own rows); nothing else between
         # the two checks touches auth.json.
-        if changed:
+        if changed or owns_provider is None:
             owns_provider = _profile_owns_pool_provider(provider)
         if not owns_provider:
             pool._borrowed_root_ids = set(disk_ids)
+    if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and any(e.source == "device_code" for e in entries):
+        # A legacy root singleton may not have any persisted pool rows yet.
+        # Track its in-memory seed too, so an explicit add claims only the new
+        # account instead of copying the borrowed token family into the profile.
+        _, source_path = _load_provider_state_with_source(_load_auth_store(), provider)
+        global_root = _global_auth_file_path()
+        if source_path is not None and global_root is not None and _same_path(source_path, global_root):
+            pool._borrowed_root_ids.update(e.id for e in entries if e.source == "device_code")
+    from agent.credential_accounts import hydrate_reference
+    pool._entries = [hydrate_reference(entry) for entry in pool._entries]
     return pool

@@ -10,6 +10,7 @@
   re-imported here so ``hermes_cli.auth.<name>`` stays the public/patchable surface."""
 
 from __future__ import annotations
+from hermes_cli.auth_pool import write_credential_pool as write_credential_pool
 
 from pm import install_hint
 import errno
@@ -954,7 +955,10 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
 
     In profile mode the global-root ``auth.json`` is a read-only fallback applied per provider ONLY
     when the profile has zero entries for it (``hermes auth add`` in the profile shadows global)."""
-    pool = _load_auth_store().get("credential_pool")
+    store = _load_auth_store()
+    selections = store.get("credential_pool_selections", {})
+    selections = selections if isinstance(selections, dict) else {}
+    pool = store.get("credential_pool")
     pool = pool if isinstance(pool, dict) else {}
     global_pool = _load_global_auth_store().get("credential_pool")
     global_pool = global_pool if isinstance(global_pool, dict) else {}
@@ -965,13 +969,13 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
             existing = merged.get(gp_key)
             if not (isinstance(gp_entries, list) and gp_entries):
                 continue
-            if not (isinstance(existing, list) and existing):  # profile wins when it has ANY entries
+            if not selections.get(gp_key) and not (isinstance(existing, list) and existing):
                 merged[gp_key] = list(gp_entries)
         return merged
 
     provider_entries = pool.get(provider_id)
-    if isinstance(provider_entries, list) and provider_entries:
-        return list(provider_entries)
+    if selections.get(provider_id) or (isinstance(provider_entries, list) and provider_entries):
+        return list(provider_entries) if isinstance(provider_entries, list) else []
     global_entries = global_pool.get(provider_id)
     return list(global_entries) if isinstance(global_entries, list) else []
 
@@ -1096,48 +1100,6 @@ def _entry_ids(entries: Iterable[Any]) -> Dict[str, Dict[str, Any]]:
     return {e.get("id"): e for e in entries if isinstance(e, dict) and e.get("id")}
 
 
-def write_credential_pool(
-    provider_id: str, entries: List[Dict[str, Any]], *,
-    removed_ids: Optional[Iterable[str]] = None,
-    status_cleared_ids: Optional[Iterable[str]] = None,
-    token_bases: Optional[Dict[str, Tuple[Any, Any]]] = None,
-) -> List[Dict[str, Any]]:
-    """Persist one provider's credential pool under auth.json.
-
-    Final disk-boundary sanitizer for borrowed credentials (callers may pass raw dicts). Entries on
-    disk but missing from *entries* (added concurrently) are merged back unless in *removed_ids*,
-    so a rotation/exhaustion rewrite never drops a concurrent credential. Entries in
-    *status_cleared_ids* were cleared deliberately (``hermes auth reset``) and skip the
-    recency merge, which would otherwise read their cleared ``last_status_at`` (None ->
-    epoch 0) as a stale snapshot and copy a still-binding cooldown back."""
-    removed = {rid for rid in (removed_ids or ()) if rid}
-    bases = token_bases or {}
-    with _auth_store_lock():
-        auth_store = _load_auth_store()
-        pool = _store_section(auth_store, "credential_pool")
-        sanitized = [
-            sanitize_borrowed_credential_payload(e, provider_id) if isinstance(e, dict) else e
-            for e in entries]
-        existing_list = pool.get(provider_id)
-        existing_list = existing_list if isinstance(existing_list, list) else []
-        existing_by_id = _entry_ids(existing_list)
-        new_ids = set(_entry_ids(sanitized))
-        status_cleared = {cid for cid in (status_cleared_ids or ()) if cid}
-        merged: List[Dict[str, Any]] = [
-            _merge_pool_row_generation(
-                e, existing_by_id.get(e.get("id")), provider_id,
-                base_pair=bases.get(e.get("id")),
-                status_cleared=e.get("id") in status_cleared,
-            )
-            if isinstance(e, dict) else e
-            for e in sanitized]
-        for disk_entry in existing_list:
-            disk_id = disk_entry.get("id") if isinstance(disk_entry, dict) else None
-            if disk_id and disk_id not in new_ids and disk_id not in removed:
-                merged.append(sanitize_borrowed_credential_payload(disk_entry, provider_id))
-        pool[provider_id] = merged
-        _save_auth_store(auth_store)
-        return merged
 
 
 def _suppressed_source_list(suppressed: Dict[str, Any], provider_id: str) -> Optional[List[str]]:
